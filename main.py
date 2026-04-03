@@ -25,7 +25,6 @@ CHANNEL_ID_GERMAN  = 1489625813098692698  # 替換為德甲頻道 ID
 CHANNEL_ID_UEFA    = 1489625832166002850  # 替換為 UEFA 頻道 ID (歐聯與歐霸共用)
 # ▲▲▲ 必須修改區：請在這裡填入你剛剛複製的 Discord 頻道 ID ▲▲▲
 
-# --- 2. 聯賽與專屬頻道映射表 ---
 LEAGUE_CHANNELS = {
     "soccer_epl": {"name": "英超 (EPL)", "id": CHANNEL_ID_ENGLISH},
     "soccer_spain_la_liga": {"name": "西甲 (La Liga)", "id": CHANNEL_ID_SPAIN},
@@ -35,11 +34,12 @@ LEAGUE_CHANNELS = {
 }
 
 HKT = datetime.timezone(datetime.timedelta(hours=8))
+# 兩個排程時間：07:00 開盤與結算 | 07:15 利息與簽到重置
 SCAN_TIME = datetime.time(hour=7, minute=0, tzinfo=HKT)
+FINANCE_TIME = datetime.time(hour=7, minute=15, tzinfo=HKT)
 
 class SakunaBot(commands.Bot):
     def __init__(self):
-        # 記憶體防護：關閉非必要 Intents
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
@@ -49,8 +49,9 @@ class SakunaBot(commands.Bot):
         self.session = aiohttp.ClientSession()
         await self.tree.sync()
         self.daily_routine_task.start()
+        self.finance_routine_task.start() 
         self.memory_cleaner.start()
-        print(f"✅ CasinOYS 啟動 | 防超時 defer() 機制已實裝", flush=True)
+        print(f"✅ CasinOYS 啟動 | 降息指數模型 (0.2%) 上線", flush=True)
 
     async def close(self):
         if self.session: await self.session.close()
@@ -60,16 +61,26 @@ class SakunaBot(commands.Bot):
     async def memory_cleaner(self):
         gc.collect()
 
+    # --- 排程一：07:00 賽果結算與開盤 ---
     @tasks.loop(time=SCAN_TIME)
     async def daily_routine_task(self):
         if not API_KEY: return
-        print("🌅 [Daily Routine] 開始執行每日 07:00 例行任務...", flush=True)
+        print("🌅 [Daily Routine] 07:00 賽果結算與開盤...", flush=True)
         await self.process_settlements()
         await self.process_new_odds()
-        print("✅ [Daily Routine] 今日結算與開盤全數完成！", flush=True)
+
+    # --- 排程二：07:15 銀行利息發放與簽到重置 ---
+    @tasks.loop(time=FINANCE_TIME)
+    async def finance_routine_task(self):
+        print("🏦 [Finance] 正在執行 07:15 利息結算...", flush=True)
+        try:
+            supabase.rpc('process_daily_finance', {}).execute()
+            print("✅ [Finance] 所有玩家利息發放完畢，簽到已重置！", flush=True)
+        except Exception as e:
+            print(f"❌ [Finance] 利息結算錯誤: {e}", flush=True)
 
     async def process_settlements(self):
-        check = supabase.table("Events").select("event_id").eq("status", 0).execute()
+        check = supabase.table("events").select("event_id").eq("status", 0).execute()
         if not check.data: return
 
         for league_key in LEAGUE_CHANNELS.keys():
@@ -88,14 +99,14 @@ class SakunaBot(commands.Bot):
                         win_choice = 'A' if h_score > a_score else 'C' if a_score > h_score else 'B'
                         title = f"{h_team} vs {a_team}"
                         
-                        res = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
+                        res = supabase.table("events").select("event_id").eq("title", title).eq("status", 0).execute()
                         if res.data:
                             for event in res.data:
                                 await self.do_payout(event['event_id'], win_choice, title)
                     del matches
                     gc.collect() 
             except Exception as e:
-                print(f"❌ [Error] 結算異常: {e}", flush=True)
+                pass
 
     async def process_new_odds(self):
         for league_key, info in LEAGUE_CHANNELS.items():
@@ -115,7 +126,7 @@ class SakunaBot(commands.Bot):
                     h_name, a_name = match['home_team'], match['away_team']
                     title = f"{h_name} vs {a_name}"
                     
-                    duplicate = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
+                    duplicate = supabase.table("events").select("event_id").eq("title", title).eq("status", 0).execute()
                     if duplicate.data: continue
                     
                     outcomes = match['bookmakers'][0]['markets'][0]['outcomes']
@@ -123,12 +134,15 @@ class SakunaBot(commands.Bot):
                     o_c = next(o['price'] for o in outcomes if o['name'] == a_name)
                     o_b = next(o['price'] for o in outcomes if o['name'] == 'Draw')
                     
-                    res = supabase.table("Events").insert({
+                    # 賠率增加 20%
+                    o_a, o_b, o_c = round(o_a * 1.2, 2), round(o_b * 1.2, 2), round(o_c * 1.2, 2)
+                    
+                    res = supabase.table("events").insert({
                         "title": title, "odds_a": o_a, "odds_b": o_b, "odds_c": o_c, "status": 0
                     }).execute()
                     
                     view = BetView(res.data[0]['event_id'], o_a, o_b, o_c, title, h_name, a_name)
-                    embed = discord.Embed(title=f"🏟️ {info['name']} 今日盤口", description=f"**{title}**", color=0x3498db)
+                    embed = discord.Embed(title=f"🏟️ {info['name']} 今日盤口 (+20% 增益)", description=f"**{title}**", color=0xf1c40f)
                     embed.add_field(name=f"🏠 {h_name}", value=f"賠率: {o_a}")
                     embed.add_field(name="🤝 Draw", value=f"賠率: {o_b}")
                     embed.add_field(name=f"🚩 {a_name}", value=f"賠率: {o_c}")
@@ -137,31 +151,31 @@ class SakunaBot(commands.Bot):
                     await asyncio.sleep(1) 
                     
             except Exception as e:
-                print(f"❌ [Error] 獲取 {info['name']} 賠率失敗: {e}", flush=True)
+                pass
             gc.collect()
 
     async def do_payout(self, event_id, win_choice, title):
-        supabase.table("Events").update({"status": 2}).eq("event_id", event_id).execute()
-        bets = supabase.table("Bets").select("*").eq("event_id", event_id).eq("choice", win_choice).execute()
+        supabase.table("events").update({"status": 2}).eq("event_id", event_id).execute()
+        bets = supabase.table("bets").select("*").eq("event_id", event_id).eq("choice", win_choice).execute()
         for bet in bets.data:
             payout = int(bet['amount'] * bet['locked_odds'])
-            supabase.rpc('increment_wallet', {'row_id': bet['user_id'], 'amount': payout}).execute()
+            supabase.rpc('increment_bank', {'row_id': bet['user_id'], 'amount': payout}).execute()
 
 # --- DAL (資料存取層) ---
 def get_user_data(user_id):
     uid = str(user_id)
-    res = supabase.table("Users").select("*").eq("user_id", uid).execute()
+    res = supabase.table("users").select("*").eq("user_id", uid).execute()
     if not res.data:
-        supabase.table("Users").insert({"user_id": uid, "wallet": 1000, "bank": 0}).execute()
-        return 1000, 0
-    return res.data[0]['wallet'], res.data[0]['bank']
+        supabase.table("users").insert({"user_id": uid, "bank": 0, "daily_lvl": 1, "last_claim": ""}).execute()
+        return {"user_id": uid, "bank": 0, "daily_lvl": 1, "last_claim": ""}
+    return res.data[0]
 
-# --- UI 元件 ---
+# --- UI 元件：銀行直扣 ---
 class BetModal(discord.ui.Modal):
     def __init__(self, event_id, choice, odds, title):
         super().__init__(title=f"下注確認 - {title}")
         self.event_id, self.choice, self.odds = event_id, choice, odds
-        self.amt = discord.ui.TextInput(label=f"下注金額 (賠率: {odds})", placeholder="例如: 100")
+        self.amt = discord.ui.TextInput(label=f"直接扣除銀行存款 (加成賠率: {odds})", placeholder="例如: 100")
         self.add_item(self.amt)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -172,14 +186,17 @@ class BetModal(discord.ui.Modal):
             return await interaction.response.send_message("❌ 格式錯誤", ephemeral=True)
         
         uid = str(interaction.user.id)
-        w, _ = get_user_data(uid)
-        if w < amt: return await interaction.response.send_message("❌ 餘額不足", ephemeral=True)
+        user = get_user_data(uid)
+        b = user['bank']
         
-        supabase.table("Users").update({"wallet": w - amt}).eq("user_id", uid).execute()
-        supabase.table("Bets").insert({
+        if b < amt: 
+            return await interaction.response.send_message("❌ 銀行存款不足，等待 07:15 領取 /daily 吧", ephemeral=True)
+        
+        supabase.table("users").update({"bank": b - amt}).eq("user_id", uid).execute()
+        supabase.table("bets").insert({
             "user_id": uid, "event_id": self.event_id, "choice": self.choice, "amount": amt, "locked_odds": self.odds
         }).execute()
-        await interaction.response.send_message(f"✅ 成功下注 `${amt}`！", ephemeral=True)
+        await interaction.response.send_message(f"✅ 成功從銀行下注 `${amt}`！絕對隱私模式已開啟。", ephemeral=True)
 
 class BetView(discord.ui.View):
     def __init__(self, event_id, o_a, o_b, o_c, title, h_name, a_name):
@@ -194,55 +211,64 @@ class BetView(discord.ui.View):
     @discord.ui.button(label="C", style=discord.ButtonStyle.red, custom_id="btn_c")
     async def b_c(self, i, b): await i.response.send_modal(BetModal(self.eid, 'C', self.odds['C'], self.title))
 
-# --- 指令系統 (全面加入 defer 機制) ---
+# --- 指令系統 ---
 bot = SakunaBot()
 
-@bot.tree.command(name="balance", description="查看當前資產")
+@bot.tree.command(name="balance", description="查看當前銀行資產與 VIP 等級 (僅限自己可見)")
 async def balance(interaction: discord.Interaction):
-    # 第一步：先延遲回應，爭取處理時間
     await interaction.response.defer(ephemeral=True)
     try:
-        w, b = get_user_data(interaction.user.id)
-        # 第二步：處理完成後回傳結果 (使用 followup)
-        await interaction.followup.send(f"👛 錢包: `${w}` | 🏦 銀行: `${b}`", ephemeral=True)
+        user = get_user_data(interaction.user.id)
+        lvl = user['daily_lvl']
+        # 更新顯示 0.2% 模型
+        current_rate = 0.2 * (2 ** (lvl-1))
+        await interaction.followup.send(f"🏦 銀行存款: `${int(user['bank'])}`\n⭐ 目前等級: `VIP {lvl}` (利息 {current_rate}%)", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ 讀取資料失敗: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ 讀取失敗: {e}", ephemeral=True)
 
-@bot.tree.command(name="deposit", description="將錢包的錢存入銀行")
-async def deposit(interaction: discord.Interaction, amount: int):
+@bot.tree.command(name="daily", description="領取每日簽到金 (07:15 重置)")
+async def daily(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
-        if amount <= 0: 
-            return await interaction.followup.send("❌ 金額必須大於 0", ephemeral=True)
-        
         uid = str(interaction.user.id)
-        w, b = get_user_data(uid)
+        user = get_user_data(uid)
+        today = datetime.datetime.now(HKT).strftime('%Y-%m-%d')
         
-        if w < amount: 
-            return await interaction.followup.send("❌ 錢包餘額不足", ephemeral=True)
+        if user['last_claim'] == today:
+            return await interaction.followup.send("❌ 你今天已經領取過了！請等待明天 07:15 利息結算後再領。", ephemeral=True)
+            
+        lvl = user['daily_lvl']
+        reward = int(10000 * (2 ** (lvl - 1)))
         
-        supabase.table("Users").update({"wallet": w - amount, "bank": b + amount}).eq("user_id", uid).execute()
-        await interaction.followup.send(f"✅ 成功存款 `${amount}`入銀行！", ephemeral=True)
+        new_bank = user['bank'] + reward
+        supabase.table("users").update({"bank": new_bank, "last_claim": today}).eq("user_id", uid).execute()
+        
+        await interaction.followup.send(f"🎁 簽到成功！領取了 `${reward}` 注入銀行。\n🏦 目前總額: `${int(new_bank)}`", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ 存款失敗: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ 領取失敗: {e}", ephemeral=True)
 
-@bot.tree.command(name="withdraw", description="將銀行的錢提領至錢包")
-async def withdraw(interaction: discord.Interaction, amount: int):
+@bot.tree.command(name="upgrade", description="花費銀行存款升級 VIP 等級 (解鎖更高利息與簽到金)")
+async def upgrade(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
-        if amount <= 0: 
-            return await interaction.followup.send("❌ 金額必須大於 0", ephemeral=True)
-        
         uid = str(interaction.user.id)
-        w, b = get_user_data(uid)
+        user = get_user_data(uid)
+        lvl = user['daily_lvl']
+        b = user['bank']
         
-        if b < amount: 
-            return await interaction.followup.send("❌ 銀行存款不足", ephemeral=True)
+        cost = int(20000 * (2 ** lvl))
         
-        supabase.table("Users").update({"wallet": w + amount, "bank": b - amount}).eq("user_id", uid).execute()
-        await interaction.followup.send(f"✅ 成功提款 `${amount}`至錢包！", ephemeral=True)
+        if b < cost:
+            return await interaction.followup.send(f"❌ 存款不足！\n升級至 **VIP {lvl+1}** 需要 `${cost}`，目前存款為 `${int(b)}`。", ephemeral=True)
+            
+        supabase.table("users").update({"bank": b - cost, "daily_lvl": lvl + 1}).eq("user_id", uid).execute()
+        
+        new_reward = int(10000 * (2 ** lvl))
+        # 更新顯示 0.2% 升級預覽
+        new_rate = 0.2 * (2 ** lvl)
+        await interaction.followup.send(f"🎉 升級成功！\n⭐ 新等級: **VIP {lvl+1}**\n💰 每日簽到金提升至: `${new_reward}`\n📈 每日利息提升至: `{new_rate}%`", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ 提款失敗: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ 升級失敗: {e}", ephemeral=True)
 
 if __name__ == '__main__':
     bot.run(TOKEN)
