@@ -1,10 +1,11 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from discord.app_commands import Choice
 import os
 import gc
 import aiohttp
+import datetime
+import asyncio
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -14,43 +15,47 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 API_KEY = os.getenv('ODDS_API_KEY')
 SB_URL = os.getenv('SUPABASE_URL')
 SB_KEY = os.getenv('SUPABASE_KEY')
-ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 
 supabase: Client = create_client(SB_URL, SB_KEY)
 
-# 聯賽 API Key 對應表 (Top 5 + Cups + World Cup + UEFA)
-LEAGUES = {
-    "soccer_epl": "英超 (EPL)",
-    "soccer_spain_la_liga": "西甲 (La Liga)",
-    "soccer_italy_serie_a": "意甲 (Serie A)",
-    "soccer_germany_bundesliga": "德甲 (Bundesliga)",
-    "soccer_france_ligue_one": "法甲 (Ligue 1)",
-    "soccer_england_efl_cup": "英格蘭聯賽盃 (EFL/FA)",
-    "soccer_spain_copa_del_rey": "西班牙國王盃",
-    "soccer_italy_coppa_italia": "意大利盃",
-    "soccer_germany_dfb_pokal": "德國盃",
-    "soccer_france_coupe_de_france": "法國盃",
-    "soccer_uefa_champs_league": "歐聯 (UCL)",
-    "soccer_uefa_europa_league": "歐霸 (UEL)",
-    "soccer_uefa_europa_conference_league": "歐協聯 (UECL)",
-    "soccer_fifa_world_cup": "世界盃 (World Cup)"
+# ▼▼▼ 必須修改區：請在這裡填入你剛剛複製的 Discord 頻道 ID ▼▼▼
+CHANNEL_ID_ENGLISH = 1489625770232909985  # 替換為英超頻道 ID
+CHANNEL_ID_SPAIN   = 1489625792903118929  # 替換為西甲頻道 ID
+CHANNEL_ID_GERMAN  = 1489625813098692698  # 替換為德甲頻道 ID
+CHANNEL_ID_UEFA    = 1489625832166002850  # 替換為 UEFA 頻道 ID (歐聯與歐霸共用)
+# ▲▲▲ 必須修改區：請在這裡填入你剛剛複製的 Discord 頻道 ID ▲▲▲
+
+# --- 2. 聯賽與專屬頻道映射表 (Channel Mapping) ---
+# 將 5 個 API 聯賽精準映射到你指定的 4 個 Discord 頻道
+LEAGUE_CHANNELS = {
+    "soccer_epl": {"name": "英超 (EPL)", "id": CHANNEL_ID_ENGLISH},
+    "soccer_spain_la_liga": {"name": "西甲 (La Liga)", "id": CHANNEL_ID_SPAIN},
+    "soccer_germany_bundesliga": {"name": "德甲 (Bundesliga)", "id": CHANNEL_ID_GERMAN},
+    "soccer_uefa_champs_league": {"name": "歐聯 (UCL)", "id": CHANNEL_ID_UEFA},
+    "soccer_uefa_europa_league": {"name": "歐霸 (UEL)", "id": CHANNEL_ID_UEFA}
 }
+
+# 設定時區為香港時間 (UTC+8)
+HKT = datetime.timezone(datetime.timedelta(hours=8))
+# 設定每日執行時間為 07:00 HKT
+SCAN_TIME = datetime.time(hour=7, minute=0, tzinfo=HKT)
 
 class SakunaBot(commands.Bot):
     def __init__(self):
+        # 記憶體優化：關閉不需要的 Intents
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
         self.session = None
-        # 記憶體優化：只追蹤有開盤的聯賽，避免 API Quota 浪費
-        self.active_leagues = set() 
 
     async def setup_hook(self):
+        # 持久化 Session
         self.session = aiohttp.ClientSession()
         await self.tree.sync()
-        self.auto_settle_task.start()
+        # 啟動每日早晨例行任務
+        self.daily_routine_task.start()
         self.memory_cleaner.start()
-        print(f"✅ CasinOYS 核心啟動 | 銀行模組上線 | 支援 14 大賽事", flush=True)
+        print(f"✅ CasinOYS 啟動 | 每日 07:00 HKT 自動分發模式已開啟 (4 頻道版)", flush=True)
 
     async def close(self):
         if self.session: await self.session.close()
@@ -60,23 +65,29 @@ class SakunaBot(commands.Bot):
     @tasks.loop(minutes=30)
     async def memory_cleaner(self):
         gc.collect()
-        print("🧹 [System] GC 回收完成", flush=True)
 
-    # --- 節流優化版：背景自動結算 ---
-    @tasks.loop(minutes=180)
-    async def auto_settle_task(self):
-        if not API_KEY or not self.active_leagues: return
+    # --- 核心：每日 07:00 自動結算與開盤 ---
+    @tasks.loop(time=SCAN_TIME)
+    async def daily_routine_task(self):
+        if not API_KEY: return
+        print("🌅 [Daily Routine] 開始執行每日 07:00 例行任務...", flush=True)
         
+        # 步驟 1：掃描並結算所有存在的未派彩賽事
+        await self.process_settlements()
+        
+        # 步驟 2：獲取新盤口並分發到 4 個對應頻道
+        await self.process_new_odds()
+        
+        print("✅ [Daily Routine] 今日結算與開盤全數完成！", flush=True)
+
+    async def process_settlements(self):
+        print("🔍 [Auto-Settle] 正在掃描賽果...", flush=True)
         check = supabase.table("Events").select("event_id").eq("status", 0).execute()
         if not check.data: return
 
-        print(f"🔍 [Auto-Settle] 正在掃描活動聯賽: {self.active_leagues}", flush=True)
-        
-        # 僅針對有開盤的聯賽發送 API，極限節省 Quota
-        for sport_key in list(self.active_leagues):
-            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
+        for league_key in LEAGUE_CHANNELS.keys():
+            url = f"https://api.the-odds-api.com/v4/sports/{league_key}/scores/"
             params = {'apiKey': API_KEY, 'daysFrom': 1}
-            
             try:
                 async with self.session.get(url, params=params) as resp:
                     if resp.status != 200: continue
@@ -91,14 +102,62 @@ class SakunaBot(commands.Bot):
                         win_choice = 'A' if h_score > a_score else 'C' if a_score > h_score else 'B'
                         title = f"{h_team} vs {a_team}"
                         
-                        event_res = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
-                        if event_res.data:
-                            for event in event_res.data:
+                        res = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
+                        if res.data:
+                            for event in res.data:
                                 await self.do_payout(event['event_id'], win_choice, title)
                     del matches
-                    gc.collect()
+                    gc.collect() # 確保 RAM 不會被大型 JSON 撐爆
             except Exception as e:
-                print(f"❌ [Error] {sport_key} 結算異常: {e}", flush=True)
+                print(f"❌ [Error] 結算 {league_key} 時發生錯誤: {e}", flush=True)
+
+    async def process_new_odds(self):
+        print("📊 [Auto-Open] 正在分發今日新盤口...", flush=True)
+        for league_key, info in LEAGUE_CHANNELS.items():
+            channel = self.get_channel(info["id"])
+            if not channel:
+                print(f"⚠️ [Warning] 找不到聯賽 {info['name']} 的對應頻道 ID: {info['id']}，請檢查設定", flush=True)
+                continue
+                
+            url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/"
+            params = {'apiKey': API_KEY, 'regions': 'uk', 'markets': 'h2h', 'oddsFormat': 'decimal'}
+            
+            try:
+                async with self.session.get(url, params=params) as resp:
+                    if resp.status != 200: continue
+                    data = await resp.json()
+                    if not data: continue
+
+                # 為避免洗版，每個聯賽每日只取最快開賽的前 3 場
+                for match in data[:3]:
+                    h_name, a_name = match['home_team'], match['away_team']
+                    title = f"{h_name} vs {a_name}"
+                    
+                    # 避免重複開盤：檢查資料庫是否已有同一場狀態為 0 (未開打) 的賽事
+                    duplicate = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
+                    if duplicate.data: continue
+                    
+                    outcomes = match['bookmakers'][0]['markets'][0]['outcomes']
+                    o_a = next(o['price'] for o in outcomes if o['name'] == h_name)
+                    o_c = next(o['price'] for o in outcomes if o['name'] == a_name)
+                    o_b = next(o['price'] for o in outcomes if o['name'] == 'Draw')
+                    
+                    res = supabase.table("Events").insert({
+                        "title": title, "odds_a": o_a, "odds_b": o_b, "odds_c": o_c, "status": 0
+                    }).execute()
+                    
+                    view = BetView(res.data[0]['event_id'], o_a, o_b, o_c, title, h_name, a_name)
+                    embed = discord.Embed(title=f"🏟️ {info['name']} 今日盤口", description=f"**{title}**", color=0x3498db)
+                    embed.add_field(name=f"🏠 {h_name}", value=f"賠率: {o_a}")
+                    embed.add_field(name="🤝 Draw", value=f"賠率: {o_b}")
+                    embed.add_field(name=f"🚩 {a_name}", value=f"賠率: {o_c}")
+                    
+                    await channel.send(embed=embed, view=view)
+                    await asyncio.sleep(1) # 防止觸發 Discord API Rate Limit
+                    
+            except Exception as e:
+                print(f"❌ [Error] 獲取 {info['name']} 賠率失敗: {e}", flush=True)
+            gc.collect()
 
     async def do_payout(self, event_id, win_choice, title):
         supabase.table("Events").update({"status": 2}).eq("event_id", event_id).execute()
@@ -163,7 +222,6 @@ async def balance(interaction: discord.Interaction):
     w, b = get_user_data(interaction.user.id)
     await interaction.response.send_message(f"👛 錢包: `${w}` | 🏦 銀行: `${b}`", ephemeral=True)
 
-# 銀行金融系統：存款
 @bot.tree.command(name="deposit", description="將錢包的錢存入銀行")
 async def deposit(interaction: discord.Interaction, amount: int):
     if amount <= 0: return await interaction.response.send_message("❌ 金額必須大於 0", ephemeral=True)
@@ -174,7 +232,6 @@ async def deposit(interaction: discord.Interaction, amount: int):
     supabase.table("Users").update({"wallet": w - amount, "bank": b + amount}).eq("user_id", uid).execute()
     await interaction.response.send_message(f"✅ 成功存款 `${amount}`入銀行！", ephemeral=True)
 
-# 銀行金融系統：提款
 @bot.tree.command(name="withdraw", description="將銀行的錢提領至錢包")
 async def withdraw(interaction: discord.Interaction, amount: int):
     if amount <= 0: return await interaction.response.send_message("❌ 金額必須大於 0", ephemeral=True)
@@ -184,50 +241,6 @@ async def withdraw(interaction: discord.Interaction, amount: int):
     
     supabase.table("Users").update({"wallet": w + amount, "bank": b - amount}).eq("user_id", uid).execute()
     await interaction.response.send_message(f"✅ 成功提款 `${amount}`至錢包！", ephemeral=True)
-
-# 擴展版開盤系統：支援選擇聯賽
-@bot.tree.command(name="auto_open", description="【管理員】選擇特定聯賽開盤")
-@app_commands.describe(league="選擇要獲取賠率的聯賽")
-@app_commands.choices(league=[Choice(name=v, value=k) for k, v in LEAGUES.items()][:25]) # Discord 限制最多 25 個選項
-async def auto_open(interaction: discord.Interaction, league: str):
-    if interaction.user.id != ADMIN_ID:
-        return await interaction.response.send_message("❌ 權限不足", ephemeral=True)
-    
-    await interaction.response.defer(ephemeral=True)
-    bot.active_leagues.add(league) # 將選擇的聯賽加入記憶體追蹤名單
-    
-    url = f"https://api.the-odds-api.com/v4/sports/{league}/odds/"
-    params = {'apiKey': API_KEY, 'regions': 'uk', 'markets': 'h2h', 'oddsFormat': 'decimal'}
-    
-    try:
-        async with bot.session.get(url, params=params) as resp:
-            data = await resp.json()
-            if not data: return await interaction.followup.send("❌ 該聯賽目前無賽事賠率。")
-
-        for match in data[:3]:
-            h_name, a_name = match['home_team'], match['away_team']
-            title = f"{h_name} vs {a_name}"
-            
-            outcomes = match['bookmakers'][0]['markets'][0]['outcomes']
-            o_a = next(o['price'] for o in outcomes if o['name'] == h_name)
-            o_c = next(o['price'] for o in outcomes if o['name'] == a_name)
-            o_b = next(o['price'] for o in outcomes if o['name'] == 'Draw')
-            
-            res = supabase.table("Events").insert({
-                "title": title, "odds_a": o_a, "odds_b": o_b, "odds_c": o_c, "status": 0
-            }).execute()
-            
-            view = BetView(res.data[0]['event_id'], o_a, o_b, o_c, title, h_name, a_name)
-            embed = discord.Embed(title=f"🏟️ {LEAGUES[league]} 盤口", description=f"**{title}**", color=0x3498db)
-            embed.add_field(name=f"🏠 {h_name}", value=f"賠率: {o_a}")
-            embed.add_field(name="🤝 Draw", value=f"賠率: {o_b}")
-            embed.add_field(name=f"🚩 {a_name}", value=f"賠率: {o_c}")
-            await interaction.channel.send(embed=embed, view=view)
-            
-        await interaction.followup.send(f"✅ {LEAGUES[league]} 開盤完成。")
-    except Exception as e:
-        await interaction.followup.send(f"❌ 開盤失敗: {e}")
-    gc.collect()
 
 if __name__ == '__main__':
     bot.run(TOKEN)
