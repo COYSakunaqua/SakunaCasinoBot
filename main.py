@@ -9,31 +9,31 @@ import asyncio
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# --- 1. 系統初始化與環境變數 ---
+# --- 1. 系統初始化 ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 API_KEY = os.getenv('ODDS_API_KEY')
 SB_URL = os.getenv('SUPABASE_URL')
 SB_KEY = os.getenv('SUPABASE_KEY')
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 
 supabase: Client = create_client(SB_URL, SB_KEY)
 
-# ▼▼▼ 必須修改區：請務必填入正確的 ID ▼▼▼
+# --- 2. 頻道設定 ---
+# 請務必填入正確的頻道 ID
 CHANNEL_ID_ENGLISH = 1489625770232909985  # 替換為英超頻道 ID
 CHANNEL_ID_SPAIN   = 1489625792903118929  # 替換為西甲頻道 ID
 CHANNEL_ID_GERMAN  = 1489625813098692698  # 替換為德甲頻道 ID
 CHANNEL_ID_UEFA    = 1489625832166002850  # 替換為 UEFA 頻道 ID (歐聯與歐霸共用)
 CHANNEL_ID_GUIDE   = 1489640799636554070  # 「新手指南」頻道 ID
 CHANNEL_ID_BUG     = 1489643447861248133  # 「questions-bugs-suggestions」頻道 ID
-# ▲▲▲ 必須修改區 ▲▲▲
 
-# 錯誤訊息後綴 
 ERR_FOOTER = f"\n⚠️ 如持續出錯，請前往 <#{CHANNEL_ID_BUG}> 回報。"
 
 LEAGUE_CHANNELS = {
     "soccer_epl": {"name": "英超 (EPL)", "id": CHANNEL_ID_ENGLISH},
     "soccer_spain_la_liga": {"name": "西甲 (La Liga)", "id": CHANNEL_ID_SPAIN},
-    "soccer_germany_bundesliga": {"name": "德甲 (Bundesliga)", "id": CHANNEL_ID_GERMAN},
+    "soccer_germany_bundesliga": {"name": "德甲 (Bund)", "id": CHANNEL_ID_GERMAN},
     "soccer_uefa_champs_league": {"name": "歐聯 (UCL)", "id": CHANNEL_ID_UEFA},
     "soccer_uefa_europa_league": {"name": "歐霸 (UEL)", "id": CHANNEL_ID_UEFA}
 }
@@ -45,7 +45,7 @@ FINANCE_TIME = datetime.time(hour=7, minute=15, tzinfo=HKT)
 class SakunaBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True # 偵測新人加入 
+        intents.members = True # 開啟新人偵測
         intents.message_content = True
         super().__init__(command_prefix='!', intents=intents)
         self.session = None
@@ -56,13 +56,8 @@ class SakunaBot(commands.Bot):
         self.daily_routine_task.start()
         self.finance_routine_task.start() 
         self.memory_cleaner.start()
-        print(f"✅ CasinOYS 啟動 | 自動引導與報錯機制已就緒", flush=True)
+        print(f"✅ CasinOYS 核心啟動 | 數據庫: Users | 利息: 0.2%", flush=True)
 
-    async def close(self):
-        if self.session: await self.session.close()
-        await super().close()
-
-    # --- 新人加入引導  ---
     @commands.Cog.listener()
     async def on_member_join(self, member):
         channel = self.get_channel(CHANNEL_ID_GUIDE)
@@ -73,19 +68,23 @@ class SakunaBot(commands.Bot):
     async def memory_cleaner(self):
         gc.collect()
 
+    # --- 每日 07:00 掃描 ---
     @tasks.loop(time=SCAN_TIME)
     async def daily_routine_task(self):
         if not API_KEY: return
         await self.process_settlements()
         await self.process_new_odds()
 
+    # --- 每日 07:15 利息 ---
     @tasks.loop(time=FINANCE_TIME)
     async def finance_routine_task(self):
-        try: supabase.rpc('process_daily_finance', {}).execute()
-        except Exception: print("Finance Task Error", flush=True)
+        try:
+            supabase.rpc('process_daily_finance', {}).execute()
+        except Exception:
+            pass
 
     async def process_settlements(self):
-        check = supabase.table("events").select("event_id").eq("status", 0).execute()
+        check = supabase.table("Events").select("event_id").eq("status", 0).execute()
         if not check.data: return
         for league_key in LEAGUE_CHANNELS.keys():
             url = f"https://api.the-odds-api.com/v4/sports/{league_key}/scores/"
@@ -101,7 +100,7 @@ class SakunaBot(commands.Bot):
                         a_score = next(s['score'] for s in match['scores'] if s['name'] == a_team)
                         win_choice = 'A' if h_score > a_score else 'C' if a_score > h_score else 'B'
                         title = f"{h_team} vs {a_team}"
-                        res = supabase.table("events").select("event_id").eq("title", title).eq("status", 0).execute()
+                        res = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
                         if res.data:
                             for event in res.data: await self.do_payout(event['event_id'], win_choice, title)
                     del matches
@@ -121,16 +120,16 @@ class SakunaBot(commands.Bot):
                 for match in data[:3]:
                     h_name, a_name = match['home_team'], match['away_team']
                     title = f"{h_name} vs {a_name}"
-                    duplicate = supabase.table("events").select("event_id").eq("title", title).eq("status", 0).execute()
+                    duplicate = supabase.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
                     if duplicate.data: continue
                     outcomes = match['bookmakers'][0]['markets'][0]['outcomes']
                     o_a = next(o['price'] for o in outcomes if o['name'] == h_name)
                     o_c = next(o['price'] for o in outcomes if o['name'] == a_name)
                     o_b = next(o['price'] for o in outcomes if o['name'] == 'Draw')
                     o_a, o_b, o_c = round(o_a * 1.2, 2), round(o_b * 1.2, 2), round(o_c * 1.2, 2)
-                    res = supabase.table("events").insert({"title": title, "odds_a": o_a, "odds_b": o_b, "odds_c": o_c, "status": 0}).execute()
+                    res = supabase.table("Events").insert({"title": title, "odds_a": o_a, "odds_b": o_b, "odds_c": o_c, "status": 0}).execute()
                     view = BetView(res.data[0]['event_id'], o_a, o_b, o_c, title, h_name, a_name)
-                    embed = discord.Embed(title=f"🏟️ {info['name']} 今日盤口 (+20% 增益)", description=f"**{title}**", color=0xf1c40f)
+                    embed = discord.Embed(title=f"🏟️ {info['name']} 今日盤口", description=f"**{title}**", color=0xf1c40f)
                     embed.add_field(name=f"🏠 {h_name}", value=f"賠率: {o_a}"); embed.add_field(name="🤝 Draw", value=f"賠率: {o_b}"); embed.add_field(name=f"🚩 {a_name}", value=f"賠率: {o_c}")
                     await channel.send(embed=embed, view=view)
                     await asyncio.sleep(1) 
@@ -138,17 +137,17 @@ class SakunaBot(commands.Bot):
             gc.collect()
 
     async def do_payout(self, event_id, win_choice, title):
-        supabase.table("events").update({"status": 2}).eq("event_id", event_id).execute()
-        bets = supabase.table("bets").select("*").eq("event_id", event_id).eq("choice", win_choice).execute()
+        supabase.table("Events").update({"status": 2}).eq("event_id", event_id).execute()
+        bets = supabase.table("Bets").select("*").eq("event_id", event_id).eq("choice", win_choice).execute()
         for bet in bets.data:
             payout = int(bet['amount'] * bet['locked_odds'])
             supabase.rpc('increment_bank', {'row_id': bet['user_id'], 'amount': payout}).execute()
 
 def get_user_data(user_id):
     uid = str(user_id)
-    res = supabase.table("users").select("*").eq("user_id", uid).execute()
+    res = supabase.table("Users").select("*").eq("user_id", uid).execute()
     if not res.data:
-        supabase.table("users").insert({"user_id": uid, "bank": 0, "daily_lvl": 1, "last_claim": ""}).execute()
+        supabase.table("Users").insert({"user_id": uid, "bank": 0, "daily_lvl": 1, "last_claim": ""}).execute()
         return {"user_id": uid, "bank": 0, "daily_lvl": 1, "last_claim": ""}
     return res.data[0]
 
@@ -156,19 +155,19 @@ class BetModal(discord.ui.Modal):
     def __init__(self, event_id, choice, odds, title):
         super().__init__(title=f"下注確認 - {title}")
         self.event_id, self.choice, self.odds = event_id, choice, odds
-        self.amt = discord.ui.TextInput(label=f"銀行存款直扣 (賠率: {odds})", placeholder="例如: 100")
+        self.amt = discord.ui.TextInput(label=f"銀行存款直扣 (賠率: {odds})", placeholder="100")
         self.add_item(self.amt)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             amt = int(self.amt.value)
             if amt <= 0: raise ValueError
-        except: return await interaction.response.send_message("❌ 格式錯誤", ephemeral=True)
+        except: return await interaction.response.send_message("❌ 請輸入正整數", ephemeral=True)
         uid = str(interaction.user.id); user = get_user_data(uid); b = user['bank']
-        if b < amt: return await interaction.response.send_message(f"❌ 銀行存款不足{ERR_FOOTER}", ephemeral=True)
-        supabase.table("users").update({"bank": b - amt}).eq("user_id", uid).execute()
-        supabase.table("bets").insert({"user_id": uid, "event_id": self.event_id, "choice": self.choice, "amount": amt, "locked_odds": self.odds}).execute()
-        await interaction.response.send_message(f"✅ 成功下注 `${amt}`！絕對隱私模式已開啟。", ephemeral=True)
+        if b < amt: return await interaction.response.send_message(f"❌ 存款不足{ERR_FOOTER}", ephemeral=True)
+        supabase.table("Users").update({"bank": b - amt}).eq("user_id", uid).execute()
+        supabase.table("Bets").insert({"user_id": uid, "event_id": self.event_id, "choice": self.choice, "amount": amt, "locked_odds": self.odds}).execute()
+        await interaction.response.send_message(f"✅ 成功從銀行下注 `${amt}`！", ephemeral=True)
 
 class BetView(discord.ui.View):
     def __init__(self, event_id, o_a, o_b, o_c, title, h_name, a_name):
@@ -184,36 +183,42 @@ class BetView(discord.ui.View):
 
 bot = SakunaBot()
 
-@bot.tree.command(name="balance", description="查看當前銀行資產與 VIP 等級 (僅限自己可見)")
+@bot.tree.command(name="balance", description="查看我的銀行資產 (僅自己可見)")
 async def balance(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
         user = get_user_data(interaction.user.id); lvl = user['daily_lvl']; rate = 0.2 * (2 ** (lvl-1))
-        await interaction.followup.send(f"🏦 銀行存款: `${int(user['bank'])}`\n⭐ 目前等級: `VIP {lvl}` (利息 {rate}%)", ephemeral=True)
-    except Exception as e: await interaction.followup.send(f"❌ 讀取失敗: {e}{ERR_FOOTER}", ephemeral=True)
+        await interaction.followup.send(f"🏦 銀行存款: `${int(user['bank'])}`\n⭐ VIP 等級: `{lvl}` (日息 {rate}%)", ephemeral=True)
+    except Exception as e: await interaction.followup.send(f"❌ 錯誤: {e}{ERR_FOOTER}", ephemeral=True)
 
 @bot.tree.command(name="daily", description="領取每日獎勵金 (07:15 重置)")
 async def daily(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
         uid = str(interaction.user.id); user = get_user_data(uid); today = datetime.datetime.now(HKT).strftime('%Y-%m-%d')
-        if user['last_claim'] == today: return await interaction.followup.send("❌ 今天領過了！明天 07:15 再來。", ephemeral=True)
+        if user['last_claim'] == today: return await interaction.followup.send("❌ 今天領過了！", ephemeral=True)
         lvl = user['daily_lvl']; reward = int(10000 * (2 ** (lvl - 1)))
-        new_bank = user['bank'] + reward
-        supabase.table("users").update({"bank": new_bank, "last_claim": today}).eq("user_id", uid).execute()
-        await interaction.followup.send(f"🎁 領取了 `${reward}`！目前總額: `${int(new_bank)}`", ephemeral=True)
-    except Exception as e: await interaction.followup.send(f"❌ 領取失敗: {e}{ERR_FOOTER}", ephemeral=True)
+        supabase.table("Users").update({"bank": user['bank'] + reward, "last_claim": today}).eq("user_id", uid).execute()
+        await interaction.followup.send(f"🎁 領取了 `${reward}`！", ephemeral=True)
+    except Exception as e: await interaction.followup.send(f"❌ 錯誤: {e}{ERR_FOOTER}", ephemeral=True)
 
-@bot.tree.command(name="upgrade", description="花費銀行存款升級 VIP 等級")
+@bot.tree.command(name="upgrade", description="提升 VIP 等級")
 async def upgrade(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
         uid = str(interaction.user.id); user = get_user_data(uid); lvl = user['daily_lvl']; b = user['bank']
         cost = int(20000 * (2 ** lvl))
         if b < cost: return await interaction.followup.send(f"❌ 存款不足！升級 VIP {lvl+1} 需要 `${cost}`。", ephemeral=True)
-        supabase.table("users").update({"bank": b - cost, "daily_lvl": lvl + 1}).eq("user_id", uid).execute()
+        supabase.table("Users").update({"bank": b - cost, "daily_lvl": lvl + 1}).eq("user_id", uid).execute()
         await interaction.followup.send(f"🎉 成功升級至 VIP {lvl+1}！", ephemeral=True)
-    except Exception as e: await interaction.followup.send(f"❌ 升級失敗: {e}{ERR_FOOTER}", ephemeral=True)
+    except Exception as e: await interaction.followup.send(f"❌ 錯誤: {e}{ERR_FOOTER}", ephemeral=True)
+
+@bot.tree.command(name="force_run", description="【管理員】立即抓取最新盤口")
+async def force_run(interaction: discord.Interaction):
+    if interaction.user.id != ADMIN_ID: return await interaction.response.send_message("❌ 權限不足", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    await bot.process_new_odds()
+    await interaction.followup.send("🚀 開盤完成！")
 
 if __name__ == '__main__':
     bot.run(TOKEN)
