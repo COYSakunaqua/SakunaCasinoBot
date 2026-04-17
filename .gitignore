@@ -5,3 +5,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Archives (防止打包了 .env 的壓縮檔外洩)
+*.zip
+*.rar
+*.tar.gz
