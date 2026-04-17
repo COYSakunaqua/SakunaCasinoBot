@@ -1,220 +1,163 @@
 import discord
-from discord.ext import commands, tasks
-import gc
-import datetime
-import asyncio
-from utils.config import SCAN_TIME, FINANCE_TIME, WEEKLY_TIME, HKT, API_KEY, LEAGUE_CHANNELS, CHANNEL_ID_LEADERBOARD
-from utils.helpers import get_user_data
-from ui.views import BetView
+from discord.ext import commands
+from discord import app_commands
+import random
+import math
 
-class TasksCog(commands.Cog):
+from utils.config import ERR_FOOTER
+from utils.helpers import get_user_data, get_display_choice
+
+class Betting(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.memory_cleaner.start()
-        self.daily_routine_task.start()
-        self.finance_routine_task.start()
-        self.weekly_leaderboard_task.start()
 
-    def cog_unload(self):
-        self.memory_cleaner.cancel()
-        self.daily_routine_task.cancel()
-        self.finance_routine_task.cancel()
-        self.weekly_leaderboard_task.cancel()
-
-    @tasks.loop(minutes=30)
-    async def memory_cleaner(self):
-        # 嚴格控制 DisCloud 100MB 記憶體
-        gc.collect()
-
-    @tasks.loop(time=SCAN_TIME)
-    async def daily_routine_task(self):
-        if not API_KEY: return
-        await self.process_settlements()
-        await self.process_new_odds()
-
-    @tasks.loop(time=FINANCE_TIME)
-    async def finance_routine_task(self):
-        try: self.bot.db.rpc('process_daily_finance', {}).execute()
-        except Exception: pass
-
-    @tasks.loop(time=WEEKLY_TIME)
-    async def weekly_leaderboard_task(self):
-        now = datetime.datetime.now(HKT)
-        if now.weekday() == 0:
-            try:
-                last_monday = now - datetime.timedelta(days=7)
-                last_sunday = now - datetime.timedelta(days=1)
-                date_range_str = f"{last_monday.day}/{last_monday.month} - {last_sunday.day}/{last_sunday.month}"
-
-                all_users = self.bot.db.table("Users").select("*").gt("weekly_bet_count", 0).order("weekly_profit", desc=True).execute()
-                if not all_users.data: return
-                
-                channel = self.bot.get_channel(CHANNEL_ID_LEADERBOARD) 
-                if channel:
-                    embed = discord.Embed(title=f"🏆 CasinOYS 賭神週榜結算 ({date_range_str})", description="上週的王者與參與獎金已自動派發至銀行：", color=0xffd700)
-                    rewards = [75000, 50000, 25000, 12500]
-                    medals = ["🥇", "🥈", "🥉", "🏅"]
-                    
-                    desc_top = ""
-                    for i, user in enumerate(all_users.data):
-                        uid = user['user_id']
-                        profit = user.get('weekly_profit', 0)
-                        
-                        if i < len(rewards):
-                            reward = rewards[i]
-                            self.bot.db.table("Users").update({"bank": user['bank'] + reward}).eq("user_id", uid).execute()
-                            desc_top += f"{medals[i]} 第 {i+1} 名: <@{uid}>\n純利: `${profit:,}` | 獲得: `${reward:,}`\n\n"
-                        else:
-                            self.bot.db.table("Users").update({"bank": user['bank'] + 5000}).eq("user_id", uid).execute()
-                    
-                    embed.add_field(name="🌟 Top 4 賭神", value=desc_top or "無", inline=False)
-                    embed.add_field(name="🎁 參與獎勵", value="其餘本週有下注的玩家，已全數自動獲得 `$5,000` 參與獎金！", inline=False)
-                    embed.set_footer(text="積分已全數歸零，新一週的廝殺正式開始！")
-                    await channel.send(embed=embed)
-                
-                self.bot.db.rpc('reset_weekly_profit', {}).execute()
-            except Exception: pass
-
-    async def process_settlements(self):
-        check = self.bot.db.table("Events").select("event_id").eq("status", 0).execute()
-        if not check.data: return
-        for league_key in LEAGUE_CHANNELS.keys():
-            url = f"https://api.the-odds-api.com/v4/sports/{league_key}/scores/"
-            params = {'apiKey': API_KEY, 'daysFrom': 3}
-            try:
-                async with self.bot.session.get(url, params=params) as resp:
-                    if resp.status != 200: continue
-                    matches = await resp.json()
-                    for match in matches:
-                        if not match['completed']: continue
-                        h_team, a_team = match['home_team'], match['away_team']
-                        h_score = next(s['score'] for s in match['scores'] if s['name'] == h_team)
-                        a_score = next(s['score'] for s in match['scores'] if s['name'] == a_team)
-                        win_choice = 'A' if h_score > a_score else 'C' if a_score > h_score else 'B'
-                        title = f"{h_team} vs {a_team}"
-                        res = self.bot.db.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
-                        if res.data:
-                            for event in res.data: await self.do_payout(event['event_id'], win_choice, title)
-                    del matches
-                    gc.collect() 
-            except Exception: pass
-
-    async def process_new_odds(self):
-        now_hkt = datetime.datetime.now(HKT)
-        for league_key, info in LEAGUE_CHANNELS.items():
-            channel = self.bot.get_channel(info["id"])
-            if not channel: continue
-            url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/"
-            params = {'apiKey': API_KEY, 'regions': 'uk', 'markets': 'h2h', 'oddsFormat': 'decimal'}
-            try:
-                async with self.bot.session.get(url, params=params) as resp:
-                    if resp.status != 200: continue
-                    data = await resp.json()
-                
-                upcoming_matches = []
-                for match in data:
-                    match_time_utc = datetime.datetime.strptime(match['commence_time'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc)
-                    match_time_hkt = match_time_utc.astimezone(HKT)
-                    if match_time_hkt > now_hkt and match_time_hkt < now_hkt + datetime.timedelta(hours=48):
-                        upcoming_matches.append((match, match_time_hkt))
-                
-                upcoming_matches.sort(key=lambda x: x[1])
-                
-                for match, match_time_hkt in upcoming_matches[:15]:
-                    h_name, a_name = match['home_team'], match['away_team']
-                    title = f"{h_name} vs {a_name}"
-                    time_display = match_time_hkt.strftime('%m-%d %H:%M')
-                    commence_ts = int(match_time_hkt.timestamp()) 
-
-                    duplicate = self.bot.db.table("Events").select("event_id").eq("title", title).eq("status", 0).execute()
-                    if duplicate.data: continue
-                    outcomes = match['bookmakers'][0]['markets'][0]['outcomes']
-                    o_a = next(o['price'] for o in outcomes if o['name'] == h_name)
-                    o_c = next(o['price'] for o in outcomes if o['name'] == a_name)
-                    o_b = next(o['price'] for o in outcomes if o['name'] == 'Draw')
-                    
-                    o_a, o_b, o_c = round(o_a * 1.2, 2), round(o_b * 1.2, 2), round(o_c * 1.2, 2)
-                    
-                    res = self.bot.db.table("Events").insert({
-                        "title": title, "odds_a": o_a, "odds_b": o_b, "odds_c": o_c, "status": 0, "commence_time": commence_ts
-                    }).execute()
-                    
-                    view = BetView(self.bot, res.data[0]['event_id'], o_a, o_b, o_c, title, h_name, a_name)
-                    embed = discord.Embed(title=f"🏟️ {info['name']} 最新盤口 (+20%)", description=f"{title}", color=0xf1c40f)
-                    embed.add_field(name="⏱️ 開賽時間 (HKT)", value=f"`{time_display}`\n*(開賽後自動鎖定)*", inline=False)
-                    embed.add_field(name=f"🏠 {h_name}", value=f"賠率: {o_a}")
-                    embed.add_field(name="🤝 Draw", value=f"賠率: {o_b}")
-                    embed.add_field(name=f"🚩 {a_name}", value=f"賠率: {o_c}")
-                    await channel.send(embed=embed, view=view)
-                    await asyncio.sleep(1) 
-            except Exception: pass
-            gc.collect()
-
-    async def do_payout(self, event_id, win_choice, title):
-        self.bot.db.table("Events").update({"status": 2, "winning_choice": win_choice}).eq("event_id", event_id).execute()
-        all_bets = self.bot.db.table("Bets").select("*").eq("event_id", event_id).execute()
-        
-        treasury_tax_total = 0
-        user_bet_results = {} 
-
-        for bet in all_bets.data:
-            # 關鍵防阻塞機制 (Yielding)
-            await asyncio.sleep(0.05)
-            
-            uid = bet['user_id']
-            if uid not in user_bet_results:
-                user_bet_results[uid] = {'win_base_payout': 0, 'is_win': False}
-            
-            if bet['choice'] == win_choice:
-                user_bet_results[uid]['is_win'] = True
-                user_bet_results[uid]['win_base_payout'] += int(bet['amount'] * bet['locked_odds'])
-
-        for uid, result in user_bet_results.items():
-            await asyncio.sleep(0.05)
-            
+    @app_commands.command(name="mystery_box", description="🎲 花費 $5,000 購買盲盒注單 (隨機賽事/選項/暴擊賠率)")
+    async def mystery_box(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = str(interaction.user.id)
             user = get_user_data(self.bot, uid)
-            streak = user.get('current_streak', 0)
+            amt = 5000
 
-            if result['is_win']:
-                pct_sum = 0.0
-                for i in range(1, streak + 1):
-                    if i == 1: pct_sum += 0.05
-                    elif i == 2: pct_sum += 0.04
-                    elif i == 3: pct_sum += 0.03
-                    elif i == 4: pct_sum += 0.02
-                    else: pct_sum += 0.01
+            if user['bank'] < amt:
+                return await interaction.followup.send(f"❌ 存款不足！購買盲盒需要 `${amt:,}`。{ERR_FOOTER}", ephemeral=True)
 
-                base_payout = result['win_base_payout']
-                payout_with_bonus = int(base_payout * (1 + pct_sum))
+            events_res = self.bot.db.table("Events").select("*").eq("status", 0).execute()
+            if not events_res.data:
+                return await interaction.followup.send("❌ 目前沒有待開賽的盤口，無法抽取盲盒。", ephemeral=True)
 
-                tax_amount = 0
-                final_payout = payout_with_bonus
-                if user.get('daily_lvl', 1) >= 3:
-                    tax_amount = int(payout_with_bonus * 0.02)
-                    final_payout -= tax_amount
-                    treasury_tax_total += tax_amount
+            bets_res = self.bot.db.table("Bets").select("event_id").eq("user_id", uid).execute()
+            bet_event_ids = {b['event_id'] for b in bets_res.data} if bets_res.data else set()
+            
+            available_events = [e for e in events_res.data if e['event_id'] not in bet_event_ids]
+            
+            if not available_events:
+                return await interaction.followup.send("❌ 你已經在所有待開賽事中下過注了！為防止套利，盲盒暫時無法抽取。", ephemeral=True)
 
-                debt = user.get('debt', 0)
-                actual_deposit = final_payout
+            event = random.choice(available_events)
+            choice = random.choice(['A', 'B', 'C'])
+
+            base_odds = event['odds_a'] if choice == 'A' else event['odds_b'] if choice == 'B' else event['odds_c']
+            r = random.random()
+            multiplier = round(1.5 + 3.5 * (1 - math.sqrt(r)), 2)
+            final_odds = round(base_odds * multiplier, 2)
+            real_event_id = event['event_id']
+
+            new_bank = user['bank'] - amt
+            new_profit = user.get('weekly_profit', 0) - amt
+            new_bet_count = user.get('weekly_bet_count', 0) + 1
+            
+            self.bot.db.table("Users").update({
+                "bank": new_bank,
+                "weekly_profit": new_profit,
+                "weekly_bet_count": new_bet_count
+            }).eq("user_id", uid).execute()
+
+            self.bot.db.table("Bets").insert({
+                "user_id": uid,
+                "event_id": real_event_id,
+                "choice": choice,
+                "amount": amt,
+                "locked_odds": final_odds
+            }).execute()
+
+            display_choice = get_display_choice(event['title'], choice)
+
+            embed = discord.Embed(title="🎁 盲盒注單開啟成功！", color=0x9b59b6)
+            embed.add_field(name="🎯 鎖定賽事", value=f"`{event['title']}`", inline=False)
+            embed.add_field(name="🚩 盲猜選項", value=f"`{display_choice}` (原賠率: {base_odds})", inline=True)
+            embed.add_field(name="⚡ 暴擊倍率", value=f"`{multiplier}x`", inline=True)
+            embed.add_field(name="🔥 最終賠率", value=f"`{final_odds}`", inline=True)
+            embed.set_footer(text="祝你好運！此注單已同步至 /mybets")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 系統錯誤: {e}{ERR_FOOTER}", ephemeral=True)
+
+    @app_commands.command(name="mybets", description="查看最近的 10 筆賽事注單 (自動聚合加碼本金)")
+    async def mybets(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = str(interaction.user.id)
+            user = get_user_data(self.bot, uid)
+            bets = self.bot.db.table("Bets").select("*").eq("user_id", uid).order("bet_id", desc=True).limit(100).execute()
+            
+            if not bets.data:
+                return await interaction.followup.send("📭 你還沒有任何下注紀錄喔！", ephemeral=True)
                 
-                if debt > 0:
-                    if final_payout >= debt:
-                        actual_deposit = final_payout - debt
-                        self.bot.db.table("Users").update({"debt": 0, "current_streak": streak + 1}).eq("user_id", uid).execute()
-                    else:
-                        actual_deposit = 0
-                        self.bot.db.table("Users").update({"debt": debt - final_payout, "current_streak": streak + 1}).eq("user_id", uid).execute()
-                else:
-                    self.bot.db.table("Users").update({"current_streak": streak + 1}).eq("user_id", uid).execute()
+            aggregated_bets = {}
+            event_order = []
+            
+            for bet in bets.data:
+                eid = bet['event_id']
+                if eid not in aggregated_bets:
+                    aggregated_bets[eid] = {
+                        'choice': bet['choice'],
+                        'total_amount': 0,
+                        'total_payout': 0
+                    }
+                    event_order.append(eid)
                 
-                if actual_deposit > 0:
-                    self.bot.db.rpc('increment_bank', {'row_id': uid, 'amount': actual_deposit}).execute()
-            else:
-                self.bot.db.table("Users").update({"current_streak": 0}).eq("user_id", uid).execute()
+                aggregated_bets[eid]['total_amount'] += bet['amount']
+                aggregated_bets[eid]['total_payout'] += int(bet['amount'] * bet['locked_odds'])
 
-        if treasury_tax_total > 0:
-            t_user = get_user_data(self.bot, "TREASURY")
-            self.bot.db.table("Users").update({"bank": t_user['bank'] + treasury_tax_total}).eq("user_id", "TREASURY").execute()
+            embed = discord.Embed(title="📊 你的最近注單 (Top 10 賽事)", color=0x3498db)
+            
+            count = 0
+            for eid in event_order:
+                if count >= 10: break
+                
+                ev = self.bot.db.table("Events").select("*").eq("event_id", eid).execute()
+                if ev.data:
+                    event = ev.data[0]
+                    agg_bet = aggregated_bets[eid]
+                    status_icon = "⏳ 待開賽" if event['status'] == 0 else "結算中"
+                    
+                    total_amt = agg_bet['total_amount']
+                    total_pay = agg_bet['total_payout'] 
+                    avg_odds = round(total_pay / total_amt, 2)
+                    
+                    display_choice = get_display_choice(event['title'], agg_bet['choice'])
+                    result = f"預期基礎派彩: `${total_pay:,}`"
+                    
+                    if event['status'] == 2:
+                        if agg_bet['choice'] == event.get('winning_choice'):
+                            status_icon = "✅ 贏得"
+                            net_profit = total_pay - total_amt
+                            result = f"基礎派彩: `${total_pay:,}` | (本金淨利: `+{net_profit:,}`)"
+                        else:
+                            status_icon = "❌ 輸掉"
+                            result = f"虧損: `-${total_amt:,}`"
+                    
+                    desc = f"**選項:** `{display_choice}` | **總本金:** `${total_amt:,}` | **均賠率:** `{avg_odds}`\n{result}"
+                    embed.add_field(name=f"{status_icon} | {event['title']}", value=desc, inline=False)
+                    count += 1
+            
+            tax_disclaimer = "\n註: VIP 3 (含)以上玩家，贏錢結算時將自動扣除 2% 納入莊家國庫。" if user.get('daily_lvl', 1) >= 3 else ""
+            embed.set_footer(text=f"提示: 若有連勝加成，將在派彩時自動外加。{tax_disclaimer}")
+                    
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e: await interaction.followup.send(f"❌ 讀取失敗: {e}{ERR_FOOTER}", ephemeral=True)
+
+    @app_commands.command(name="leaderboard", description="🏆 隨時查看本週純利排行榜 (個人可見)")
+    async def leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True) 
+        try:
+            top = self.bot.db.table("Users").select("user_id, weekly_profit").order("weekly_profit", desc=True).limit(10).execute()
+            if not top.data:
+                return await interaction.followup.send("📭 目前還沒有人有下注獲利紀錄。", ephemeral=True)
+                
+            embed = discord.Embed(title="🏆 CasinOYS 賭神週榜 (實時更新)", description="結算時間：每週一 07:05 (HKT) 自動派發至名人堂\n*只計算下注純利，不受簽到與升級影響*", color=0xe67e22)
+            medals = ["🥇", "🥈", "🥉", "4.", "5.", "6.", "7.", "8.", "9.", "10."]
+            
+            desc_text = ""
+            for i, user in enumerate(top.data):
+                profit = user.get('weekly_profit', 0)
+                desc_text += f"**{medals[i]}** <@{user['user_id']}> ─ `${profit:,}`\n\n"
+                
+            embed.description += f"\n\n{desc_text}"
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e: await interaction.followup.send(f"❌ 讀取失敗: {e}{ERR_FOOTER}", ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(TasksCog(bot))
+    await bot.add_cog(Betting(bot))
