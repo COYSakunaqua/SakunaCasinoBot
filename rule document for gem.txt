@@ -1,18 +1,19 @@
-# CasinOYS 開發與維護準則 (Rule Document for Gem) v4.0.6
+# CasinOYS 開發與維護準則 (Rule Document for Gem) v4.1.0 (Modular Edition)
 
 【開發與討論流程 (5-Step Workflow)】
 在開發新功能或修復 Bug 時，必須嚴格遵守以下互動流程：
 1. 需求發起：由用戶提出建議，或要求架構師給出建議。
 2. 細節展開：架構師提供該功能的具體細節與邊界條件。
-3. 執行藍圖：架構師詳細解釋該計劃在底層架構（資料庫、記憶體、排程）上的具體執行方式。
+3. 執行藍圖：架構師詳細解釋該計劃在底層架構（資料庫、記憶體、排程、Cogs 模組）上的具體執行方式。
 4. 深度徵詢：架構師向用戶詢問決策意見（禁止只問 Yes/No，必須提供選項或請用戶針對關鍵數值、機制給出有意義的意見）。
 5. 完整代碼輸出：在雙方達成最終共識後，架構師才能給出 100% 完整的代碼。
 
 【代碼輸出規範】
-1. 完整性原則：禁止給出部分片段（No partial snippets）。每次改動必須提供完整更新後的 main.py 內容，確保「一鍵複製並替換」。
+1. 完整性原則：禁止給出部分片段（No partial snippets）。每次改動必須提供「完整更新後的對應模組內容（如 cogs/economy.py, ui/views.py 等）」，確保「一鍵複製並替換」。
 2. 絕對隱私與穩定：所有觸發資料庫讀寫的 Slash Command 與 UI 交互，必須在第一行強制實裝 `await interaction.response.defer(ephemeral=True)`。
 3. 註釋標準：遵循 DSE 標準，對於邏輯複雜處（如時間戳轉換、防套利過濾、記憶體優化、Event Loop 讓出）進行逐行 Comment。
 4. 邏輯檢查：輸出前必須在腦中模擬，確認無語法錯誤、異步阻塞 (Async Issues) 或時間重疊。
+5. 依賴注入 (Dependency Injection) 嚴格規範：禁止在模組內使用全域資料庫變數。必須透過傳遞 `bot` 實例，並使用 `bot.db` 與 `bot.session` 來進行外部連線。
 
 【系統架構與業務邏輯規範】
 1. 經濟模型底線：
@@ -32,6 +33,6 @@
    - 排程嚴格綁定 HKT 時區 (UTC+8)。
 
 【資源控制規範 (DisCloud 100MB 限制)】
-1. 使用 `aiohttp.ClientSession()` 持久化連線。
-2. 每 30 分鐘執行 `gc.collect()`。
-3. 關閉 `chunk_guilds_at_startup` 並將 `max_messages` 降至 10。
+1. 共用資源連線：將 `aiohttp.ClientSession()` 與 `Supabase Client` 綁定於 `bot` 實例。
+2. 每 30 分鐘執行 `gc.collect()` 於排程模組中。
+3. `main.py` 啟動時必須關閉 `chunk_guilds_at_startup` 並將 `max_messages` 降至 10。

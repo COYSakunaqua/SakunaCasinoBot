@@ -1,16 +1,22 @@
 # CasinOYS 系統架構與技術白皮書 (System for Gem)
-**版本:** V4.0.6 (2026-04 更新)
+**版本:** V4.1.0 (Modular Edition)
 **運行環境:** Python 3.10, discord.py, DisCloud (100MB RAM 限制)
 **時區基準:** HKT (UTC+8)
 
-## 1. 系統核心架構 (Core Architecture)
-* **資料庫層 (DAL):** 使用 Supabase (PostgreSQL)。包含 `TREASURY` 國庫帳戶。
-* **網路連線:** `aiohttp.ClientSession` 持久化連線抓取 The Odds API。
+## 1. 系統模組化架構 (Modular Architecture)
+系統採用扁平化 Cog 架構與依賴注入 (Dependency Injection) 以嚴格控管記憶體 (100MB RAM)：
+* **`main.py`**: 核心啟動器。負責初始化 `bot.db` (Supabase) 與 `bot.session` (aiohttp)，並動態載入所有 `cogs`。
+* **`utils/`**: `config.py` 存放全域常數；`helpers.py` 存放共用邏輯 (如 `get_user_data`，須傳入 `bot` 實例)。
+* **`ui/views.py`**: 獨立存放 `BetView` 與 `BetModal`，實現 UI 與業務邏輯解耦。
+* **`cogs/`**: 包含 `economy` (經濟與VIP)、`betting` (盲盒與注單)、`tasks` (自動化排程)、`admin` (後台監控)。
+
+## 2. 系統核心防護技術
+* **資料庫層 (DAL):** 使用 Supabase (PostgreSQL)。包含 `TREASURY` 國庫帳戶。透過 `bot.db` 存取。
 * **記憶體防護:** `gc.collect()` 垃圾回收與 Discord 預設快取極限瘦身。
 * **零延遲動態 UI:** 下注按鈕透過 `get_display_choice` 動態將 A/B/C 翻譯為隊名，並在 Modal 彈出瞬間從 DB 讀取餘額顯示。
 * **非同步防阻塞 (Async Unblocking):** 派彩引擎採用 `await asyncio.sleep(0.05)` 微休眠技術，避免單線程 Event Loop 凍結。
 
-## 2. 資料庫綱要 (Database Schema)
+## 3. 資料庫綱要 (Database Schema)
 ### 表格: "Users" (用戶數據)
 * `user_id` (TEXT/PK): Discord 用戶 ID (含系統帳戶 'TREASURY')。
 * `bank` (INTEGER): 銀行總存款餘額。
@@ -37,12 +43,12 @@
 * `amount` (INTEGER): 下注本金。
 * `locked_odds` (FLOAT): 鎖定時的最終賠率 (盲盒會寫入 1.5x~5.0x 暴擊後的數值)。
 
-## 3. 自動化排程引擎 (Scheduled Tasks - HKT)
+## 4. 自動化排程引擎 (Scheduled Tasks - HKT)
 * **07:00 | `daily_routine_task`**: 追溯 3 天賽果進行派彩 (含連勝結算與抽稅)，並發布未來 48 小時內新盤口。
 * **07:05 (週一) | `weekly_leaderboard_task`**: 發放週榜獎勵、普獎，並清空週數據。
 * **07:15 | `finance_routine_task`**: 觸發 RPC 發放全服日息。
 
-## 4. 關鍵業務邏輯
+## 5. 關鍵業務邏輯
 * **連勝狂熱 (Win Streak):** 勝場依序給予 +5%, +4%, +3%, +2%, 後續皆 +1% 之派彩紅利，輸局歸零。
 * **盲盒注單 (Mystery Box):** 強制過濾已下注賽事防套利，並賦予 `random.random()` 平方根遞減的 1.5x - 5.0x 暴擊倍率。
 * **鯨魚警報 (Whale Alert):** 單筆下注 >= $100,000 即觸發專屬公頻 Webhook 廣播。
