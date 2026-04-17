@@ -1,7 +1,10 @@
 import os
 import datetime
+from dotenv import load_dotenv
 
-# 從 .env 讀取，避免在各個檔案重複 load_dotenv
+# 【重大修正】必須在這裡優先強制載入 .env，否則底層變數會抓不到預設為 0
+load_dotenv()
+
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 ODDS_API_KEY = os.getenv('ODDS_API_KEY')
 
