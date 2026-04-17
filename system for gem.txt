@@ -1,0 +1,48 @@
+# CasinOYS 系統架構與技術白皮書 (System for Gem)
+**版本:** V4.0.6 (2026-04 更新)
+**運行環境:** Python 3.10, discord.py, DisCloud (100MB RAM 限制)
+**時區基準:** HKT (UTC+8)
+
+## 1. 系統核心架構 (Core Architecture)
+* **資料庫層 (DAL):** 使用 Supabase (PostgreSQL)。包含 `TREASURY` 國庫帳戶。
+* **網路連線:** `aiohttp.ClientSession` 持久化連線抓取 The Odds API。
+* **記憶體防護:** `gc.collect()` 垃圾回收與 Discord 預設快取極限瘦身。
+* **零延遲動態 UI:** 下注按鈕透過 `get_display_choice` 動態將 A/B/C 翻譯為隊名，並在 Modal 彈出瞬間從 DB 讀取餘額顯示。
+* **非同步防阻塞 (Async Unblocking):** 派彩引擎採用 `await asyncio.sleep(0.05)` 微休眠技術，避免單線程 Event Loop 凍結。
+
+## 2. 資料庫綱要 (Database Schema)
+### 表格: "Users" (用戶數據)
+* `user_id` (TEXT/PK): Discord 用戶 ID (含系統帳戶 'TREASURY')。
+* `bank` (INTEGER): 銀行總存款餘額。
+* `daily_lvl` (INTEGER): VIP 等級。
+* `last_claim` (TEXT): 最後領取日期 (YYYY-MM-DD)。*(註：期貨系統會將此值寫為未來日期以實施凍結)*
+* `weekly_profit` (INTEGER): 本週下注純利。
+* `weekly_bet_count` (INTEGER): 本週下注次數。
+* `debt` (INTEGER): 舊版高利貸遺留欠款 (派彩時仍會攔截抵扣)。
+* `current_streak` (INTEGER): 目前連勝場數 (用於計算分段遞減紅利 +5%, +4%, +3%...)。
+
+### 表格: "Events" (賽事數據)
+* `event_id` (SERIAL/PK): 賽事唯一 ID。
+* `title` (TEXT): 標題 ("Team A vs Team B")。
+* `odds_a` / `odds_b` / `odds_c` (FLOAT): 基礎賠率 (+20% 增益)。
+* `status` (INTEGER): 0 = 待開賽, 2 = 已結算。
+* `commence_time` (INTEGER): 開賽 Epoch Timestamp (VAR 開賽鎖定防護)。
+* `winning_choice` (TEXT): 賽果獲勝選項 ('A', 'B', 'C')。
+
+### 表格: "Bets" (注單數據)
+* `bet_id` (SERIAL/PK): 注單唯一 ID。
+* `user_id` (TEXT): 下注者 ID。
+* `event_id` (INTEGER): 關聯賽事 ID。
+* `choice` (TEXT): 下注選項 ('A', 'B', 'C')。
+* `amount` (INTEGER): 下注本金。
+* `locked_odds` (FLOAT): 鎖定時的最終賠率 (盲盒會寫入 1.5x~5.0x 暴擊後的數值)。
+
+## 3. 自動化排程引擎 (Scheduled Tasks - HKT)
+* **07:00 | `daily_routine_task`**: 追溯 3 天賽果進行派彩 (含連勝結算與抽稅)，並發布未來 48 小時內新盤口。
+* **07:05 (週一) | `weekly_leaderboard_task`**: 發放週榜獎勵、普獎，並清空週數據。
+* **07:15 | `finance_routine_task`**: 觸發 RPC 發放全服日息。
+
+## 4. 關鍵業務邏輯
+* **連勝狂熱 (Win Streak):** 勝場依序給予 +5%, +4%, +3%, +2%, 後續皆 +1% 之派彩紅利，輸局歸零。
+* **盲盒注單 (Mystery Box):** 強制過濾已下注賽事防套利，並賦予 `random.random()` 平方根遞減的 1.5x - 5.0x 暴擊倍率。
+* **鯨魚警報 (Whale Alert):** 單筆下注 >= $100,000 即觸發專屬公頻 Webhook 廣播。
