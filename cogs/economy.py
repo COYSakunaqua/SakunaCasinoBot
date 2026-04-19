@@ -4,7 +4,8 @@ from discord import app_commands
 import datetime
 
 from utils.config import VIP_ROLES, ERR_FOOTER, HKT
-from utils.helpers import get_user_data
+# 【改動】引入新開發的 async_db_execute 裝甲
+from utils.helpers import get_user_data, async_db_execute
 
 class Economy(commands.Cog):
     def __init__(self, bot):
@@ -59,7 +60,10 @@ class Economy(commands.Cog):
             lvl = user['daily_lvl']
             # VIP 指數級獎勵公式
             reward = int(10000 * (2 ** (lvl - 1)))
-            self.bot.db.table("Users").update({"bank": user['bank'] + reward, "last_claim": today}).eq("user_id", uid).execute()
+            
+            # 【改動】換用 async_db_execute 防禦寫入瞬斷
+            query = self.bot.db.table("Users").update({"bank": user['bank'] + reward, "last_claim": today}).eq("user_id", uid)
+            await async_db_execute(query)
             
             await interaction.followup.send(f"🎁 領取了 `${reward:,}`！", ephemeral=True)
         except Exception as e: 
@@ -80,7 +84,10 @@ class Economy(commands.Cog):
                 return await interaction.followup.send(f"❌ 存款不足！升級至 VIP {lvl + 1} 需要 `${cost:,}`。", ephemeral=True)
             
             new_lvl = lvl + 1
-            self.bot.db.table("Users").update({"bank": b - cost, "daily_lvl": new_lvl}).eq("user_id", uid).execute()
+            
+            # 【改動】換用 async_db_execute 防禦寫入瞬斷
+            query = self.bot.db.table("Users").update({"bank": b - cost, "daily_lvl": new_lvl}).eq("user_id", uid)
+            await async_db_execute(query)
             
             if isinstance(interaction.user, discord.Member):
                 role_to_add_id = VIP_ROLES.get(new_lvl)
@@ -112,7 +119,9 @@ class Economy(commands.Cog):
             new_lvl = lvl - 1
             new_bank = user['bank'] + pawn_value
             
-            self.bot.db.table("Users").update({"bank": new_bank, "daily_lvl": new_lvl}).eq("user_id", uid).execute()
+            # 【改動】換用 async_db_execute 防禦寫入瞬斷
+            query = self.bot.db.table("Users").update({"bank": new_bank, "daily_lvl": new_lvl}).eq("user_id", uid)
+            await async_db_execute(query)
             
             if isinstance(interaction.user, discord.Member):
                 role_to_add_id = VIP_ROLES.get(new_lvl)
@@ -154,7 +163,10 @@ class Economy(commands.Cog):
             unlock_display_date = (datetime.datetime.now(HKT) + datetime.timedelta(days=3)).strftime('%Y-%m-%d')
             
             new_bank = user['bank'] + advance_cash
-            self.bot.db.table("Users").update({"bank": new_bank, "last_claim": lock_date}).eq("user_id", uid).execute()
+            
+            # 【核心修復點】套用 async_db_execute，遭遇 Cloudflare 502 自動退避重試
+            query = self.bot.db.table("Users").update({"bank": new_bank, "last_claim": lock_date}).eq("user_id", uid)
+            await async_db_execute(query)
             
             embed = discord.Embed(title="⏳ 期貨預支合約生效", color=0xf1c40f)
             embed.add_field(name="💰 獲得預支金 (75% 貼現)", value=f"`${advance_cash:,}`", inline=False)
