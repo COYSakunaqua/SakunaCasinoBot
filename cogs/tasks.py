@@ -34,14 +34,19 @@ class TasksCog(commands.Cog):
 
     @tasks.loop(time=FINANCE_TIME)
     async def finance_routine_task(self):
-        # 採用 Python 進行遞減日息結算，覆蓋原本的 RPC
+        # 採用 Python 進行無上限線性日息結算
         try:
             all_users = self.bot.db.table("Users").select("user_id, bank, daily_lvl").gt("bank", 0).execute()
             if all_users.data:
                 for u in all_users.data:
                     lvl = u['daily_lvl']
-                    # 新版遞減日息公式 (最高 2.4%)
-                    rate = 0.005 if lvl == 1 else 0.009 if lvl == 2 else 0.013 if lvl == 3 else 0.017 if lvl == 4 else 0.02 if lvl == 5 else 0.022 if lvl == 6 else 0.024
+                    # 新版無上限線性日息公式 (VIP 7 以上每級 +0.2%)
+                    if lvl <= 6:
+                        rate_pct = {1: 0.5, 2: 0.9, 3: 1.3, 4: 1.7, 5: 2.0, 6: 2.2}.get(lvl, 0.5)
+                    else:
+                        rate_pct = 2.2 + (lvl - 6) * 0.2
+                        
+                    rate = rate_pct / 100.0
                     interest = int(u['bank'] * rate)
                     
                     if interest > 0:

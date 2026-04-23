@@ -7,15 +7,21 @@ import asyncio
 from utils.config import VIP_ROLES, ERR_FOOTER, HKT
 from utils.helpers import get_user_data
 
-# --- 豪華版邊際遞減模型設定 ---
-DAILY_REWARDS = {1: 50000, 2: 100000, 3: 160000, 4: 230000, 5: 300000, 6: 370000}
-INTEREST_RATES = {1: 0.5, 2: 0.9, 3: 1.3, 4: 1.7, 5: 2.0, 6: 2.2}
+# --- 無上限豪華版線性擴展模型 ---
+DAILY_REWARDS_BASE = {1: 50000, 2: 100000, 3: 160000, 4: 230000, 5: 300000, 6: 370000}
+INTEREST_RATES_BASE = {1: 0.5, 2: 0.9, 3: 1.3, 4: 1.7, 5: 2.0, 6: 2.2}
 
 def get_daily_reward(lvl):
-    return DAILY_REWARDS.get(lvl, 440000) # VIP 7 以上封頂 44萬
+    if lvl <= 6: 
+        return DAILY_REWARDS_BASE.get(lvl, 50000)
+    # VIP 7 以上：每級固定增加 7萬
+    return 370000 + (lvl - 6) * 70000
 
 def get_interest_rate(lvl):
-    return INTEREST_RATES.get(lvl, 2.4) # VIP 7 以上封頂 2.4%
+    if lvl <= 6: 
+        return INTEREST_RATES_BASE.get(lvl, 0.5)
+    # VIP 7 以上：每級固定增加 0.2%
+    return round(2.2 + (lvl - 6) * 0.2, 2)
 
 class Economy(commands.Cog):
     def __init__(self, bot):
