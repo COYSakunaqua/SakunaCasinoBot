@@ -2,10 +2,20 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import datetime
+import asyncio
 
 from utils.config import VIP_ROLES, ERR_FOOTER, HKT
-# 【改動】引入新開發的 async_db_execute 裝甲
-from utils.helpers import get_user_data, async_db_execute
+from utils.helpers import get_user_data
+
+# --- 豪華版邊際遞減模型設定 ---
+DAILY_REWARDS = {1: 50000, 2: 100000, 3: 160000, 4: 230000, 5: 300000, 6: 370000}
+INTEREST_RATES = {1: 0.5, 2: 0.9, 3: 1.3, 4: 1.7, 5: 2.0, 6: 2.2}
+
+def get_daily_reward(lvl):
+    return DAILY_REWARDS.get(lvl, 440000) # VIP 7 以上封頂 44萬
+
+def get_interest_rate(lvl):
+    return INTEREST_RATES.get(lvl, 2.4) # VIP 7 以上封頂 2.4%
 
 class Economy(commands.Cog):
     def __init__(self, bot):
@@ -17,7 +27,7 @@ class Economy(commands.Cog):
         try:
             user = get_user_data(self.bot, interaction.user.id)
             lvl = user['daily_lvl']
-            rate = 0.2 * (2 ** (lvl-1))
+            rate = get_interest_rate(lvl)
             profit = user.get('weekly_profit', 0)
             debt = user.get('debt', 0)
             streak = user.get('current_streak', 0)
@@ -37,7 +47,6 @@ class Economy(commands.Cog):
             
             streak_str = ""
             if streak > 0:
-                # 計算連勝紅利
                 pct_sum = sum([5, 4, 3, 2] + [1] * max(0, streak - 4))[:streak] if streak > 4 else sum([5, 4, 3, 2][:streak])
                 streak_str = f"\n🔥 目前連勝: `{streak}` 場 (下場派彩紅利: `+{pct_sum}%`)"
 
@@ -58,14 +67,22 @@ class Economy(commands.Cog):
                 return await interaction.followup.send(f"❌ 今天已經領過，或目前處於「期貨預支」冷卻期！(預計解鎖日: {unlock_date})", ephemeral=True)
                 
             lvl = user['daily_lvl']
-            # VIP 指數級獎勵公式
-            reward = int(10000 * (2 ** (lvl - 1)))
+            reward = get_daily_reward(lvl)
             
-            # 【改動】換用 async_db_execute 防禦寫入瞬斷
-            query = self.bot.db.table("Users").update({"bank": user['bank'] + reward, "last_claim": today}).eq("user_id", uid)
-            await async_db_execute(query)
-            
+            self.bot.db.table("Users").update({"bank": user['bank'] + reward, "last_claim": today}).eq("user_id", uid).execute()
             await interaction.followup.send(f"🎁 領取了 `${reward:,}`！", ephemeral=True)
+
+            # 涓滴效應：VIP 5+ 觸發全服 VIP 1~3 印鈔救濟金
+            if lvl >= 5:
+                res_poor = self.bot.db.table("Users").select("user_id, daily_lvl").in_("daily_lvl", [1, 2, 3]).execute()
+                if res_poor.data:
+                    for p_user in res_poor.data:
+                        p_lvl = p_user['daily_lvl']
+                        p_amt = get_daily_reward(p_lvl)
+                        self.bot.db.rpc('increment_bank', {'row_id': p_user['user_id'], 'amount': p_amt}).execute()
+                        # Event Loop 讓出，防止 10062 超時
+                        await asyncio.sleep(0.05)
+
         except Exception as e: 
             await interaction.followup.send(f"❌ 錯誤: {e}{ERR_FOOTER}", ephemeral=True)
 
@@ -78,16 +95,12 @@ class Economy(commands.Cog):
             lvl = user['daily_lvl']
             b = user['bank']
             
-            # 指數級升級成本公式
             cost = int(20000 * (2 ** lvl))
             if b < cost: 
                 return await interaction.followup.send(f"❌ 存款不足！升級至 VIP {lvl + 1} 需要 `${cost:,}`。", ephemeral=True)
             
             new_lvl = lvl + 1
-            
-            # 【改動】換用 async_db_execute 防禦寫入瞬斷
-            query = self.bot.db.table("Users").update({"bank": b - cost, "daily_lvl": new_lvl}).eq("user_id", uid)
-            await async_db_execute(query)
+            self.bot.db.table("Users").update({"bank": b - cost, "daily_lvl": new_lvl}).eq("user_id", uid).execute()
             
             if isinstance(interaction.user, discord.Member):
                 role_to_add_id = VIP_ROLES.get(new_lvl)
@@ -119,9 +132,7 @@ class Economy(commands.Cog):
             new_lvl = lvl - 1
             new_bank = user['bank'] + pawn_value
             
-            # 【改動】換用 async_db_execute 防禦寫入瞬斷
-            query = self.bot.db.table("Users").update({"bank": new_bank, "daily_lvl": new_lvl}).eq("user_id", uid)
-            await async_db_execute(query)
+            self.bot.db.table("Users").update({"bank": new_bank, "daily_lvl": new_lvl}).eq("user_id", uid).execute()
             
             if isinstance(interaction.user, discord.Member):
                 role_to_add_id = VIP_ROLES.get(new_lvl)
@@ -154,19 +165,15 @@ class Economy(commands.Cog):
                 return await interaction.followup.send("❌ 你今天的獎勵已經領過，或目前正處於期貨預支冷卻期，無法簽署新合約。", ephemeral=True)
             
             lvl = user['daily_lvl']
-            daily_reward = int(10000 * (2 ** (lvl - 1)))
+            daily_reward = get_daily_reward(lvl)
             
-            # 期貨貼現 75% 演算法
             advance_cash = int(daily_reward * 3 * 0.75)
             
             lock_date = (datetime.datetime.now(HKT) + datetime.timedelta(days=2)).strftime('%Y-%m-%d')
             unlock_display_date = (datetime.datetime.now(HKT) + datetime.timedelta(days=3)).strftime('%Y-%m-%d')
             
             new_bank = user['bank'] + advance_cash
-            
-            # 【核心修復點】套用 async_db_execute，遭遇 Cloudflare 502 自動退避重試
-            query = self.bot.db.table("Users").update({"bank": new_bank, "last_claim": lock_date}).eq("user_id", uid)
-            await async_db_execute(query)
+            self.bot.db.table("Users").update({"bank": new_bank, "last_claim": lock_date}).eq("user_id", uid).execute()
             
             embed = discord.Embed(title="⏳ 期貨預支合約生效", color=0xf1c40f)
             embed.add_field(name="💰 獲得預支金 (75% 貼現)", value=f"`${advance_cash:,}`", inline=False)
@@ -174,9 +181,19 @@ class Economy(commands.Cog):
             embed.set_footer(text=f"提示：你的下一次可領取日常獎勵日期為 {unlock_display_date}")
             
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+            # 涓滴效應 (期貨觸發)：VIP 5+ 觸發全服 VIP 1~3 貼現印鈔
+            if lvl >= 5:
+                res_poor = self.bot.db.table("Users").select("user_id, daily_lvl").in_("daily_lvl", [1, 2, 3]).execute()
+                if res_poor.data:
+                    for p_user in res_poor.data:
+                        p_lvl = p_user['daily_lvl']
+                        p_amt = int(get_daily_reward(p_lvl) * 3 * 0.75)
+                        self.bot.db.rpc('increment_bank', {'row_id': p_user['user_id'], 'amount': p_amt}).execute()
+                        await asyncio.sleep(0.05)
+
         except Exception as e:
             await interaction.followup.send(f"❌ 系統錯誤: {e}{ERR_FOOTER}", ephemeral=True)
 
 async def setup(bot):
-    # 將 Economy Cog 掛載到 bot 上
     await bot.add_cog(Economy(bot))

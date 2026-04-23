@@ -133,9 +133,72 @@ class Betting(commands.Cog):
                     embed.add_field(name=f"{status_icon} | {event['title']}", value=desc, inline=False)
                     count += 1
             
-            tax_disclaimer = "\n註: VIP 3 (含)以上玩家，贏錢結算時將自動扣除 2% 納入莊家國庫。" if user.get('daily_lvl', 1) >= 3 else ""
+            tax_disclaimer = "\n註: VIP 5 (含)以上玩家，贏錢結算時將自動扣除富人稅納入莊家國庫。" if user.get('daily_lvl', 1) >= 5 else ""
             embed.set_footer(text=f"提示: 若有連勝加成，將在派彩時自動外加。{tax_disclaimer}")
                     
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e: await interaction.followup.send(f"❌ 讀取失敗: {e}{ERR_FOOTER}", ephemeral=True)
+
+    @app_commands.command(name="spy", description="🕵️ 偷窺他人注單：查看指定玩家最近 10 筆已結算注單 (防範策略抄襲)")
+    async def spy(self, interaction: discord.Interaction, target: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            target_id = str(target.id)
+            bets = self.bot.db.table("Bets").select("*").eq("user_id", target_id).order("bet_id", desc=True).limit(100).execute()
+            
+            if not bets.data:
+                return await interaction.followup.send(f"📭 {target.display_name} 還沒有任何下注紀錄喔！", ephemeral=True)
+                
+            aggregated_bets = {}
+            event_order = []
+            
+            for bet in bets.data:
+                eid = bet['event_id']
+                if eid not in aggregated_bets:
+                    aggregated_bets[eid] = {
+                        'choice': bet['choice'],
+                        'total_amount': 0,
+                        'total_payout': 0
+                    }
+                    event_order.append(eid)
+                
+                aggregated_bets[eid]['total_amount'] += bet['amount']
+                aggregated_bets[eid]['total_payout'] += int(bet['amount'] * bet['locked_odds'])
+
+            embed = discord.Embed(title=f"🕵️ {target.display_name} 的歷史注單 (Top 10 已結算)", color=0x34495e)
+            
+            count = 0
+            for eid in event_order:
+                if count >= 10: break
+                
+                # 嚴格防護：只查詢 status == 2 (已結算) 的賽事，過濾待開賽
+                ev = self.bot.db.table("Events").select("*").eq("event_id", eid).eq("status", 2).execute()
+                if ev.data:
+                    event = ev.data[0]
+                    agg_bet = aggregated_bets[eid]
+                    
+                    total_amt = agg_bet['total_amount']
+                    total_pay = agg_bet['total_payout'] 
+                    avg_odds = round(total_pay / total_amt, 2)
+                    
+                    display_choice = get_display_choice(event['title'], agg_bet['choice'])
+                    
+                    if agg_bet['choice'] == event.get('winning_choice'):
+                        status_icon = "✅ 贏得"
+                        net_profit = total_pay - total_amt
+                        result = f"基礎派彩: `${total_pay:,}` | (本金淨利: `+{net_profit:,}`)"
+                    else:
+                        status_icon = "❌ 輸掉"
+                        result = f"虧損: `-${total_amt:,}`"
+                    
+                    desc = f"**選項:** `{display_choice}` | **總本金:** `${total_amt:,}` | **均賠率:** `{avg_odds}`\n{result}"
+                    embed.add_field(name=f"{status_icon} | {event['title']}", value=desc, inline=False)
+                    count += 1
+            
+            if count == 0:
+                return await interaction.followup.send(f"📭 {target.display_name} 目前的注單都在待開賽狀態，基於隱私無法偷窺！", ephemeral=True)
+            
+            embed.set_footer(text="提示: 待開賽與盲盒注單已自動隱藏，保護玩家策略。")
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e: await interaction.followup.send(f"❌ 讀取失敗: {e}{ERR_FOOTER}", ephemeral=True)
 

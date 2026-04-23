@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import gc
 import datetime
 import asyncio
-# 【修正點】精準導入 ODDS_API_KEY
+
 from utils.config import SCAN_TIME, FINANCE_TIME, WEEKLY_TIME, HKT, ODDS_API_KEY, LEAGUE_CHANNELS, CHANNEL_ID_LEADERBOARD
 from utils.helpers import get_user_data
 from ui.views import BetView
@@ -28,14 +28,27 @@ class TasksCog(commands.Cog):
 
     @tasks.loop(time=SCAN_TIME)
     async def daily_routine_task(self):
-        # 【修正點】
         if not ODDS_API_KEY: return
         await self.process_settlements()
         await self.process_new_odds()
 
     @tasks.loop(time=FINANCE_TIME)
     async def finance_routine_task(self):
-        try: self.bot.db.rpc('process_daily_finance', {}).execute()
+        # 採用 Python 進行遞減日息結算，覆蓋原本的 RPC
+        try:
+            all_users = self.bot.db.table("Users").select("user_id, bank, daily_lvl").gt("bank", 0).execute()
+            if all_users.data:
+                for u in all_users.data:
+                    lvl = u['daily_lvl']
+                    # 新版遞減日息公式 (最高 2.4%)
+                    rate = 0.005 if lvl == 1 else 0.009 if lvl == 2 else 0.013 if lvl == 3 else 0.017 if lvl == 4 else 0.02 if lvl == 5 else 0.022 if lvl == 6 else 0.024
+                    interest = int(u['bank'] * rate)
+                    
+                    if interest > 0:
+                        self.bot.db.rpc('increment_bank', {'row_id': u['user_id'], 'amount': interest}).execute()
+                    
+                    # 讓出 Event Loop 避免 10062 超時
+                    await asyncio.sleep(0.05)
         except Exception: pass
 
     @tasks.loop(time=WEEKLY_TIME)
@@ -81,7 +94,6 @@ class TasksCog(commands.Cog):
         if not check.data: return
         for league_key in LEAGUE_CHANNELS.keys():
             url = f"https://api.the-odds-api.com/v4/sports/{league_key}/scores/"
-            # 【修正點】
             params = {'apiKey': ODDS_API_KEY, 'daysFrom': 3}
             try:
                 async with self.bot.session.get(url, params=params) as resp:
@@ -107,7 +119,6 @@ class TasksCog(commands.Cog):
             channel = self.bot.get_channel(info["id"])
             if not channel: continue
             url = f"https://api.the-odds-api.com/v4/sports/{league_key}/odds/"
-            # 【修正點】
             params = {'apiKey': ODDS_API_KEY, 'regions': 'uk', 'markets': 'h2h', 'oddsFormat': 'decimal'}
             try:
                 async with self.bot.session.get(url, params=params) as resp:
@@ -176,6 +187,7 @@ class TasksCog(commands.Cog):
             
             user = get_user_data(self.bot, uid)
             streak = user.get('current_streak', 0)
+            lvl = user.get('daily_lvl', 1)
 
             if result['is_win']:
                 pct_sum = 0.0
@@ -191,8 +203,11 @@ class TasksCog(commands.Cog):
 
                 tax_amount = 0
                 final_payout = payout_with_bonus
-                if user.get('daily_lvl', 1) >= 3:
-                    tax_amount = int(payout_with_bonus * 0.02)
+                
+                # 精準累進富人稅 (1%~6%)
+                if lvl >= 5:
+                    tax_rate = min(0.06, 0.01 + (lvl - 5) * 0.01) # 5=1%, 6=2%, 7=3%, 10+=6%
+                    tax_amount = int(payout_with_bonus * tax_rate)
                     final_payout -= tax_amount
                     treasury_tax_total += tax_amount
 
