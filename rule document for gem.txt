@@ -26,4 +26,8 @@
 2. 防禦機制紅線 (不可妥協)：
    - 防套利 (Anti-Arbitrage)：單場賽事僅能押注單一選項。
    - 資訊隔離：偷窺機制/跑馬燈 嚴禁曝光 `status == 0` (待開賽) 的注單選項。
+<<<<<<< HEAD
    - Event Loop 讓出 (Yielding)：大迴圈中必須穿插 `asyncio.sleep(0.05)` 或等效非同步釋放機制。
+=======
+   - Event Loop 讓出 (Yielding)：大迴圈中必須穿插 `asyncio.sleep(0.05)` 或等效非同步釋放機制。
+>>>>>>> b843d3dc03350c3a2a304c2eb49ffc87ba2ba4a6
