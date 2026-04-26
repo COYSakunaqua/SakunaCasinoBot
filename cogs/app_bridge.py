@@ -19,40 +19,43 @@ class AppBridge(commands.Cog):
         
         user_id = str(interaction.user.id)
         
-        # 2. 生成 4 位數隨機驗證碼 (方案 A: 1A 選項)
+        # 2. 生成 4 位數隨機驗證碼
         bind_code = f"{random.randint(0, 9999):04d}"
         
-        # 3. 設定 15 分鐘時效 (方案 B: 15mins 選項)
+        # 3. 設定 15 分鐘時效
         expiry_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)
         expiry_str = expiry_time.isoformat()
 
-        # 4. 寫入資料庫 (使用獨立表 AppVerification)
-        # 使用 UPSERT 邏輯：如果用戶已生成過，則覆蓋舊碼並刷新時間
-        query = """
-        INSERT INTO "AppVerification" (user_id, code, expires_at)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (user_id) 
-        DO UPDATE SET code = $2, expires_at = $3;
-        """
-        
-        success = await async_db_execute(query, user_id, bind_code, expiry_str)
-
-        if success:
-            embed = discord.Embed(
-                title="🔐 CasinOYS App 帳號綁定",
-                description="請在 App 登入介面輸入以下驗證碼：",
-                color=discord.Color.blue()
-            )
-            embed.add_field(name="驗證碼 (Code)", value=f"```\n{bind_code}\n```", inline=False)
-            embed.add_field(name="有效時間", value="15 分鐘", inline=True)
-            embed.set_footer(text="請勿將此代碼分享給任何人 | CDM 系統守護中")
+        # 4. 寫入資料庫 (使用 Supabase PostgREST 語法進行 UPSERT)
+        try:
+            # 構建 Supabase 查詢物件 (Query Builder)
+            query = self.bot.db.table("AppVerification").upsert({
+                "user_id": user_id,
+                "code": bind_code,
+                "expires_at": expiry_str
+            })
             
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            await interaction.followup.send(
-                "❌ 資料庫連線異常，請稍後再試。若持續失敗請聯絡架構師。", 
-                ephemeral=True
-            )
+            # 透過自訂的防護層執行 (防禦 Cloudflare 瞬斷)
+            res = await async_db_execute(query)
+            
+            if res.data:
+                embed = discord.Embed(
+                    title="🔐 CasinOYS App 帳號綁定",
+                    description="請在 App 登入介面輸入以下驗證碼：",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="驗證碼 (Code)", value=f"```\n{bind_code}\n```", inline=False)
+                embed.add_field(name="有效時間", value="15 分鐘", inline=True)
+                embed.set_footer(text="請勿將此代碼分享給任何人 | CDM 系統守護中")
+                
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send("❌ 寫入失敗，請稍後再試。", ephemeral=True)
+
+        except Exception as e:
+            # 攔截所有錯誤，防止卡在「正在思考...」
+            print(f"[AppBridge Error] {e}")
+            await interaction.followup.send(f"❌ 系統發生預期外錯誤，無法生成驗證碼。請聯絡架構師。", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AppBridge(bot))
