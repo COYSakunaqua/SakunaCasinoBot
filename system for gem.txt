@@ -1,49 +1,33 @@
 # CasinOYS 系統架構與技術白皮書 (System for Gem)
-**版本:** V4.2.0 (High-Roller Economy & Spy Edition)
-**運行環境:** Python 3.10, discord.py, DisCloud (100MB RAM 限制)
+**版本:** V4.3.0 (Dual-Track Readiness Edition)
 **時區基準:** HKT (UTC+8)
 
-## 1. 系統模組化架構 (Modular Architecture)
-* **`main.py`**: 核心啟動器。負責初始化 `bot.db` (Supabase) 與 `bot.session` (aiohttp)，並動態載入所有 `cogs`。
-* **`utils/`**: 
-  - `config.py`: 全域常數與 ID 管理。
-  - `helpers.py`: 共用邏輯。包含 `get_user_data` (同步微退避) 與 `async_db_execute` (非同步重試機制，對抗 Cloudflare 502/503)。
-* **`ui/views.py`**: 獨立存放 `BetView` 與 `BetModal`。
-* **`cogs/`**: `economy` (豪華經濟與涓滴救濟)、`betting` (盲盒與Spy偷窺)、`tasks` (自動化排程與累進稅派彩)、`admin` (總經監控)。
+## 1. 系統當前狀態與雙軌架構
+系統目前處於「Discord Bot 維護」與「App 轉型準備」的雙軌並行期。所有底層資料庫邏輯必須兼容未來的 FastAPI 架構。
+* **Bot 核心**: `main.py` 負責初始化 `bot.db` 與 `bot.session`，動態載入 Cogs。
+* **防護工具**: `utils.helpers.async_db_execute` 負責攔截 Cloudflare 瞬斷並執行退避重試。
+* **經濟與排程**: 實作了涓滴救濟、累進富人稅，以及本地無上限線性日息結算。
 
-## 2. 系統核心防護技術
-* **資料庫防禦層 (DAL):** 使用 Supabase (PostgreSQL)。包含 `TREASURY` 國庫帳戶吸收富人稅。使用非同步重試防止連線瞬斷造成 10062 逾時。
-* **記憶體防護:** `gc.collect()` 定期回收與 Discord 快取極限瘦身。
-* **零延遲動態 UI:** 透過 `get_display_choice` 動態渲染隊名，Modal 彈出瞬間同步 DB 餘額。
-
-## 3. 資料庫綱要 (Database Schema)
+## 2. 資料庫綱要 (Database Schema - 雙軌過渡版)
 ### 表格: "Users" (用戶數據)
 * `user_id` (TEXT/PK): Discord 用戶 ID (含系統帳戶 'TREASURY')。
-* `bank` (INTEGER): 銀行存款餘額 (V4.2.0 後數值極大，留意型別溢出風險)。
-* `daily_lvl` (INTEGER): VIP 等級 (牽動稅率與印鈔機制)。
-* `last_claim` (TEXT): 最後領取日期 (YYYY-MM-DD)。期貨合約 (`/cashout`) 會寫入未來日期凍結帳戶。
-* `weekly_profit` (INTEGER): 本週下注純利。
-* `weekly_bet_count` (INTEGER): 本週下注次數。
-* `debt` (INTEGER): 高利貸欠款 (派彩時自動抵扣)。
-* `current_streak` (INTEGER): 連勝場數。
+* `app_uuid` (UUID/Nullable): 預留給未來 App Supabase Auth 的主鍵。
+* `bind_code` (TEXT/Nullable): 預留給未來資料轉移的金鑰。
+* `bank` (INTEGER): 銀行存款餘額。
+* `daily_lvl` (INTEGER): VIP 等級。
+* `last_claim` (TEXT): 最後領取日期 (YYYY-MM-DD)。
+* `weekly_profit` (INTEGER) / `weekly_bet_count` (INTEGER) / `debt` (INTEGER) / `current_streak` (INTEGER)。
 
 ### 表格: "Events" (賽事數據)
-* `event_id` (SERIAL/PK): 賽事唯一 ID。
-* `title` (TEXT): 標題 ("Team A vs Team B")。
-* `odds_a` / `odds_b` / `odds_c` (FLOAT): 基礎賠率 (+20% 增益)。
+* `event_id` (SERIAL/PK) / `title` (TEXT) / `odds_a`, `odds_b`, `odds_c` (FLOAT)
 * `status` (INTEGER): 0 = 待開賽, 2 = 已結算。
 * `commence_time` (INTEGER): 開賽 Epoch Timestamp (VAR 鎖定)。
 * `winning_choice` (TEXT): 賽果選項 ('A', 'B', 'C')。
 
 ### 表格: "Bets" (注單數據)
-* `bet_id` (SERIAL/PK): 注單唯一 ID。
-* `user_id` / `event_id` / `choice` / `amount` / `locked_odds`。
+* `bet_id` (SERIAL/PK) / `user_id` / `event_id` / `choice` / `amount` / `locked_odds`。
 
-## 4. 自動化排程引擎 (Scheduled Tasks - HKT)
-* **07:00 | `daily_routine_task`**: 追溯賽果派彩，實施 1%~6% 累進富人稅，並發布新盤口。
-* **07:05 (週一) | `weekly_leaderboard_task`**: 發放週榜與普獎，歸零純利。
-* **07:15 | `finance_routine_task`**: 本地 Python 迴圈結算無上限線性日息。
-
-## 5. V4.2.0 關鍵業務邏輯
-* **涓滴效應與期貨貼現:** VIP 5+ 領取日薪或預支 3 天 (75%貼現) 時，系統為 VIP 1~3 觸發等比例 M0 印鈔。
-* **Spy 偷窺機制:** `/spy` 嚴格過濾 `status == 0`，僅公開 `status == 2` 之歷史注單防抄襲。
+## 3. 核心防禦與業務邊界
+* **API 額度物理隔離**: The Odds API 僅允許每日 07:00 統一抓取，嚴禁開放給前端或一般玩家觸發。
+* **累進稅與線性擴展**: VIP 7 以上的升級與獎勵採「線性固定增長」，拒絕指數膨脹。
+* **記憶體極限**: Discord 端必須維持 `gc.collect()` 與 `Yielding`，確保在 100MB RAM 下存活。
