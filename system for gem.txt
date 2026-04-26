@@ -7,6 +7,7 @@
 * **Bot 核心**: `main.py` 負責初始化 `bot.db` 與 `bot.session`，動態載入 Cogs。
 * **防護工具**: `utils.helpers.async_db_execute` 負責攔截 Cloudflare 瞬斷並執行退避重試。
 * **經濟與排程**: 實作了涓滴救濟、累進富人稅，以及本地無上限線性日息結算。
+* **後端狀態 (Phase 1.2)**: 已於本地端建立 Python 3.12 venv 隔離環境，FastAPI 無狀態伺服器成功連線 Supabase (使用官方最新版 supabase 與 httpx 套件)，並完成 `backend/routers/economy.py` 的基礎架構 (`GET /balance`)。
 
 ## 2. 資料庫綱要 (Database Schema - 雙軌過渡版)
 ### 表格: "Users" (用戶數據)
@@ -16,22 +17,8 @@
 * `bank` (INTEGER): 銀行存款餘額。
 * `daily_lvl` (INTEGER): VIP 等級。
 * `last_claim` (TEXT): 最後領取日期 (YYYY-MM-DD)。
-* `weekly_profit` (INTEGER) / `weekly_bet_count` (INTEGER) / `debt` (INTEGER) / `current_streak` (INTEGER)。
 
-### 表格: "Events" (賽事數據)
-* `event_id` (SERIAL/PK) / `title` (TEXT) / `odds_a`, `odds_b`, `odds_c` (FLOAT)
-* `status` (INTEGER): 0 = 待開賽, 2 = 已結算。
-* `commence_time` (INTEGER): 開賽 Epoch Timestamp (VAR 鎖定)。
-* `winning_choice` (TEXT): 賽果選項 ('A', 'B', 'C')。
-
-### 表格: "Bets" (注單數據)
-* `bet_id` (SERIAL/PK) / `user_id` / `event_id` / `choice` / `amount` / `locked_odds`。
-
-## 3. 核心防禦與業務邊界
-* **API 額度物理隔離**: The Odds API 僅允許每日 07:00 統一抓取，嚴禁開放給前端或一般玩家觸發。
-* **累進稅與線性擴展**: VIP 7 以上的升級與獎勵採「線性固定增長」，拒絕指數膨脹。
-<<<<<<< HEAD
-* **記憶體極限**: Discord 端必須維持 `gc.collect()` 與 `Yielding`，確保在 100MB RAM 下存活。
-=======
-* **記憶體極限**: Discord 端必須維持 `gc.collect()` 與 `Yielding`，確保在 100MB RAM 下存活。
->>>>>>> b843d3dc03350c3a2a304c2eb49ffc87ba2ba4a6
+### 表格: "AppVerification" (App 登入綁定用)
+* `user_id` (TEXT/PK): 關聯至 Users 表，設定 ON DELETE CASCADE。
+* `code` (TEXT): 4 位數純數字臨時綁定碼。
+* `expires_at` (TIMESTAMPTZ): 驗證碼過期時間 (生成後 15 分鐘)。
