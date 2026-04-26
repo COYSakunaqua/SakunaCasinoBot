@@ -1,33 +1,29 @@
-# CasinOYS 開發與維護準則 (Rule Document for Gem) v4.2.0 (High-Roller Economy Edition)
+# CasinOYS 開發與維護準則 (Rule Document for Gem) v4.3.0 (Dual-Track Edition)
+
+【文檔衝突解決準則 (SSOT)】
+若各文檔（包含 App 藍圖與白皮書）之間存在邏輯或數值衝突，一律以本文件 (`rule document`) 與 `system document` 作為最高標準與唯一事實來源。
 
 【開發與討論流程 (5-Step Workflow)】
-在開發新功能或修復 Bug 時，必須嚴格遵守以下互動流程：
-1. 需求發起：由用戶提出建議，或要求架構師給出建議。
+1. 需求發起：由用戶提出建議，架構師需先判斷是「當前 Discord 系統維護」還是「App 轉型開發」。
 2. 細節展開：架構師提供該功能的具體細節與邊界條件。
-3. 執行藍圖：架構師詳細解釋該計劃在底層架構（資料庫、記憶體、排程、Cogs 模組）上的具體執行方式。
-4. 深度徵詢：架構師向用戶詢問決策意見（禁止只問 Yes/No，必須提供選項或請用戶針對關鍵數值、機制給出有意義的意見）。
-5. 完整代碼輸出：在雙方達成最終共識後，架構師才能給出 100% 完整的代碼。
+3. 執行藍圖：架構師詳細解釋該計劃在底層架構上的具體執行方式。
+4. 深度徵詢：架構師向用戶詢問決策意見（提供具體選項與數值決策）。
+5. 完整代碼輸出：雙方達成共識後，輸出 100% 完整代碼。
 
 【代碼輸出規範】
-1. 完整性原則：禁止給出部分片段（No partial snippets）。每次改動必須提供「完整更新後的對應模組內容（如 cogs/economy.py, ui/views.py 等）」，確保「一鍵複製並替換」。
-2. 絕對隱私與穩定：所有觸發資料庫讀寫的 Slash Command 與 UI 交互，必須在第一行強制實裝 `await interaction.response.defer(ephemeral=True)`。
-3. 註釋標準：遵循 DSE 標準，對於邏輯複雜處（如時間戳轉換、防套利過濾、記憶體優化、Event Loop 讓出）進行逐行 Comment。
-4. 邏輯檢查：輸出前必須在腦中模擬，確認無語法錯誤、異步阻塞 (Async Issues) 或時間重疊。
-5. 依賴注入與錯誤捕獲：禁止在模組內使用全域資料庫變數，必須透過 `bot.db` 連線。資料庫操作應盡量使用 `utils.helpers.async_db_execute` 進行非同步重試防禦 502/503 瞬斷。
+1. 完整性原則：禁止給出部分片段 (No partial snippets)。
+2. 絕對隱私與穩定：Discord Slash Command 第一行強制 `await interaction.response.defer(ephemeral=True)`。App API 需實作適當的 HTTP 狀態碼與錯誤攔截。
+3. 註釋標準：遵循 DSE 標準，針對防套利、非同步阻塞 (Yielding) 等複雜邏輯逐行 Comment。
+4. 邏輯檢查：確認無異步阻塞 (Async Issues) 或時間重疊。
+5. 依賴注入與錯誤捕獲：禁止全域資料庫變數。Discord 需透過 `bot.db` 連線並使用 `async_db_execute` 防禦 502/503。
 
-【系統架構與業務邏輯規範 (V4.2.0 經濟紅線)】
+【系統架構與業務邏輯規範 (V4.2+ 經濟紅線)】
 1. M0 經濟與通膨控制：
    - 採「純銀行制」，無錢包概念。
-   - 豪華無上限線性模型：VIP 每日簽到與日息於 VIP 1~6 採邊際遞減，VIP 7 (含) 以上採「無限線性增長 (+$70,000 / +0.2%)」，禁止使用指數級公式 `2^(N-1)` 以防通膨崩潰。
-   - 累進富人稅 (Progressive Tax)：VIP 1~4 免稅，VIP 5~10+ 贏錢派彩時抽取 1%~6% 累進稅率納入 `TREASURY` 國庫。
-   - 涓滴效應 (Trickle-down)：VIP 5+ 執行 `/daily` 或 `/cashout` 時，系統會強制印鈔 (增加 M0) 給 VIP 1~3 作為救濟金。
+   - 豪華無上限線性模型：VIP 7 (含) 以上採「無限線性增長 (+$70,000 / +0.2%)」，絕對禁止使用指數級公式以防通膨崩潰。
+   - 累進富人稅 (Progressive Tax)：VIP 5~10+ 贏錢派彩時抽取 1%~6% 累進稅率納入 `TREASURY` 國庫。
+   - 涓滴效應 (Trickle-down)：VIP 5+ 執行日常領取或期貨預支時，強制觸發印鈔給 VIP 1~3。
 2. 防禦機制紅線 (不可妥協)：
-   - 防套利 (Anti-Arbitrage)：單場賽事僅能押注單一選項。盲盒強制排除已下注賽事。
-   - 防偷窺抄襲：`/spy` 指令只能調閱 `status == 2` (已結算) 的注單，絕對禁止曝光 `status == 0` 的待開賽策略。
-   - 全域防連點 (Debouncer)：UI 下注按鈕必須具備 2 秒全域冷卻鎖，防重複扣款。
-   - Event Loop 讓出 (Yielding)：在派彩或大迴圈中，必須穿插 `await asyncio.sleep(0.05)`，防止 Discord API 發生 10062 逾時斷線。
-
-【資源控制規範 (DisCloud 100MB 限制)】
-1. 將 `aiohttp.ClientSession()` 與 `Supabase Client` 綁定於 `bot` 實例。
-2. 每 30 分鐘執行 `gc.collect()` 於排程模組中。
-3. `main.py` 啟動時必須關閉 `chunk_guilds_at_startup` 並將 `max_messages` 降至 10。
+   - 防套利 (Anti-Arbitrage)：單場賽事僅能押注單一選項。
+   - 資訊隔離：偷窺機制/跑馬燈 嚴禁曝光 `status == 0` (待開賽) 的注單選項。
+   - Event Loop 讓出 (Yielding)：大迴圈中必須穿插 `asyncio.sleep(0.05)` 或等效非同步釋放機制。
