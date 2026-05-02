@@ -1,42 +1,39 @@
-from fastapi import APIRouter, Header, HTTPException
-from supabase import create_client, Client
-import os
-from dotenv import load_dotenv
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+import math
+# from utils.dependencies import get_current_user, supabase
 
-# 讀取環境變數
-load_dotenv()
-SB_URL = os.getenv('SUPABASE_URL')
-SB_KEY = os.getenv('SUPABASE_KEY')
+router = APIRouter(prefix="/api/economy", tags=["Economy"])
 
-# 初始化 Supabase 連線 (無狀態 RESTful 模式)
-db: Client = create_client(SB_URL, SB_KEY)
-
-# 宣告這是一個路由器 (相當於 Cog)
-router = APIRouter()
-
-@router.get("/balance", summary="獲取用戶餘額與 VIP 狀態")
-def get_balance(x_user_id: str = Header(..., description="Discord 用戶 ID")):
+@router.post("/upgrade")
+async def upgrade_vip(user = Depends(get_current_user)):
     """
-    無狀態查詢：前端必須在 Header 傳入 X-User-ID。
-    這是為了防範未經授權的越權存取。
+    處理玩家 VIP 升級。
+    核心邏輯：套用 12,500 * (VIP^2) 的純二次方公式，精準回收 M0。
     """
-    try:
-        # 直接使用 Supabase REST API 查詢
-        res = db.table("Users").select("bank, daily_lvl").eq("user_id", x_user_id).execute()
+    app_uuid = user.id
+    
+    # 1. 抓取當前資料
+    user_resp = supabase.table("Users").select("bank, daily_lvl").eq("app_uuid", app_uuid).single().execute()
+    if not user_resp.data:
+        raise HTTPException(status_code=404, detail="User not found")
         
-        # 邊界防禦：用戶不存在
-        if not res.data:
-            raise HTTPException(status_code=404, detail="User not found in CasinOYS system.")
-            
-        user_data = res.data[0]
-        return {
-            "status": "success",
-            "data": {
-                "user_id": x_user_id,
-                "bank": user_data['bank'],
-                "vip_level": user_data['daily_lvl']
-            }
-        }
-    except Exception as e:
-        # 攔截所有報錯，防止伺服器崩潰
-        raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
+    current_vip = user_resp.data["daily_lvl"]
+    current_bank = user_resp.data["bank"]
+    
+    # 2. 升級費用計算 (Base 12,500)
+    upgrade_cost = 12500 * (current_vip ** 2)
+    
+    if current_bank < upgrade_cost:
+        raise HTTPException(status_code=400, detail=f"Insufficient funds. Need ${upgrade_cost}.")
+        
+    # 3. 扣款與等級更新
+    new_bank = current_bank - upgrade_cost
+    new_vip = current_vip + 1
+    
+    supabase.table("Users").update({
+        "bank": new_bank,
+        "daily_lvl": new_vip
+    }).eq("app_uuid", app_uuid).execute()
+    
+    return {"message": "Upgraded successfully", "new_vip": new_vip, "new_bank": new_bank}
