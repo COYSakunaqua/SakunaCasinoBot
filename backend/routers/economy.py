@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from utils.dependencies import get_current_user
 from pydantic import BaseModel
 import math
 # from utils.dependencies import get_current_user, supabase
