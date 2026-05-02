@@ -24,7 +24,7 @@ app.include_router(economy.router, prefix="/api/v1/economy", tags=["Economy"])
 app.include_router(internal.router, tags=["Internal Tasks"]) # 掛載排程結算與抓盤引擎
 
 # 4. 系統健康檢查端點 (Render 部署時監控存活狀態用)
-@app.get("/health", tags=["System"])
+@app.get("/api/health", tags=["System"])
 def health_check():
     return {
         "status": "online",
