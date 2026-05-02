@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Header, Depends
-from backend.utils.dependencies import supabase  # 確保你的 supabase client 放這裡
+from backend.utils.dependencies import supabase, get_current_user  # 確保你的 supabase client 放這裡
 
 router = APIRouter(prefix="/api/internal", tags=["Internal Tasks"])
 
