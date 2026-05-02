@@ -15,7 +15,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==========================================
-# 🔑 身分驗證依賴 (V5 App 版)[cite: 6]
+# 🔑 身分驗證依賴 (V5 App 版)[cite: 3, 6]
 # ==========================================
 class UserContext:
     def __init__(self, user_id: str):
@@ -23,26 +23,21 @@ class UserContext:
 
 async def get_current_user(authorization: str = Header(None)):
     """
-    V5 身分驗證攔截器。
-    目前實作：從 Header 抓取 Bearer Token (app_uuid)。
-    未來擴充：可在此進行 JWT 解碼。
+    V5 身分驗證攔截器。從 Header 抓取 Bearer Token (app_uuid)。[cite: 3]
     """
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization Header")
     
-    # 預期格式: "Bearer <app_uuid>"
     try:
         scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise ValueError()
+        if scheme.lower() != "bearer": raise ValueError()
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid authorization scheme")
 
-    # 驗證該 UUID 是否存在於 Users 表中[cite: 6]
+    # 驗證 UUID 是否存在於 Users 表中[cite: 3, 6]
     user_check = supabase.table("Users").select("app_uuid").eq("app_uuid", token).execute()
     
     if not user_check.data:
-        raise HTTPException(status_code=401, detail="User not verified or Genesis Airdrop not claimed")
+        raise HTTPException(status_code=401, detail="User not verified or Airdrop not claimed")
 
-    # 回傳封裝好的用戶對象，供 economy.py 使用 user.id[cite: 6]
     return UserContext(user_id=token)
