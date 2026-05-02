@@ -1,24 +1,26 @@
-# CasinOYS 系統架構與技術白皮書 (System for Gem)
-**版本:** V4.3.0 (Dual-Track Readiness Edition)
-**時區基準:** HKT (UTC+8)
+# CasinOYS 系統架構與技術白皮書 (System for Gem) v5.0
 
-## 1. 系統當前狀態與雙軌架構
-系統目前處於「Discord Bot 維護」與「App 轉型準備」的雙軌並行期。所有底層資料庫邏輯必須兼容未來的 FastAPI 架構。
-* **Bot 核心**: `main.py` 負責初始化 `bot.db` 與 `bot.session`，動態載入 Cogs。
-* **防護工具**: `utils.helpers.async_db_execute` 負責攔截 Cloudflare 瞬斷並執行退避重試。
-* **經濟與排程**: 實作了涓滴救濟、累進富人稅，以及本地無上限線性日息結算。
-* **後端狀態 (Phase 1.2)**: 已於本地端建立 Python 3.12 venv 隔離環境，FastAPI 無狀態伺服器成功連線 Supabase (使用官方最新版 supabase 與 httpx 套件)，並完成 `backend/routers/economy.py` 的基礎架構 (`GET /balance`)。
+## 1. 雙軌並行架構 (Dual-Track State)
+系統目前處於「Discord Bot 維護」與「App 轉型開發」並行期。資料庫 (Supabase) 必須同時兼容兩者。
+* **Discord Bot 核心 (`main.py` & `cogs/`)**：依賴 `discord.py`，使用 Cogs 動態載入。透過 HTTP 請求直接與 Supabase 溝通，依賴 `discord_id`。
+* **App 後端核心 (`backend/routers/`)**：基於 FastAPI 的 RESTful 架構，託管於 Render。無狀態伺服器，透過 JWT 與 `app_uuid` 進行身分驗證。
+* **App 前端核心 (`ui/`)**：基於 Next.js 14 + Zustand 全域狀態管理，託管於 Vercel。提供 PWA 體驗。
 
-## 2. 資料庫綱要 (Database Schema - 雙軌過渡版)
-### 表格: "Users" (用戶數據)
-* `user_id` (TEXT/PK): Discord 用戶 ID (含系統帳戶 'TREASURY')。
-* `app_uuid` (UUID/Nullable): 預留給未來 App Supabase Auth 的主鍵。
-* `bind_code` (TEXT/Nullable): 預留給未來資料轉移的金鑰。
-* `bank` (INTEGER): 銀行存款餘額。
-* `daily_lvl` (INTEGER): VIP 等級。
-* `last_claim` (TEXT): 最後領取日期 (YYYY-MM-DD)。
+## 2. 精品盤口動態抓取引擎 (Boutique Fetching Protocol - V5)
+對接 The Odds API，實施「降級備用」與「極限保護」機制：
+* **Tier 1 (首選)**：EPL, La Liga, Bundesliga, Serie A, Ligue 1, UCL/UEL, FIFA/UEFA 盃賽。
+* **Tier 2 (枯水期)**：Championship, Club Friendlies。
+* **動態水位限制**：每天至少 10 場，最多 20 場 (若 Tier 1 賽事爆發則無視 20 場上限，全數抓取)。
+* **莊家優勢**：寫入資料庫前，所有原始賠率強制套用「淨利潤 +20%」增益。
 
-### 表格: "AppVerification" (App 登入綁定用)
-* `user_id` (TEXT/PK): 關聯至 Users 表，設定 ON DELETE CASCADE。
-* `code` (TEXT): 4 位數純數字臨時綁定碼。
-* `expires_at` (TIMESTAMPTZ): 驗證碼過期時間 (生成後 15 分鐘)。
+## 3. 資料庫綱要 (Supabase Schema - V4/V5 共存版)
+* **Users 表**：
+  - `user_id` (TEXT/PK): Discord 用戶 ID (V4 依賴)。
+  - `app_uuid` (UUID/Nullable): App 使用者的唯一識別碼 (V5 依賴)。
+  - `bank`, `daily_lvl`, `is_streak`, `rng_normal` ~ `rng_redraw`。
+* **AppVerification 表**：
+  - `user_id` (關聯 Users 表), `code` (4 位數轉移金鑰), `expires_at` (15分鐘後過期)。
+* **Matches 表 (V5 專用)**：
+  - `id` (PK), `sport_title`, `home_team`, `away_team`, `odds_data` (JSON, 僅限 h2h), `status` (0=待開, 1=已完, -1=無效)。
+* **Bets 表**：
+  - `id` (PK), `app_uuid` (或 `discord_id`), `match_id`, `option_id`, `amount`, `odds`, `is_mystery_box`, `status` (0=待結算, 1=贏, -1=輸)。

@@ -1,33 +1,30 @@
-# CasinOYS 開發與維護準則 (Rule Document for Gem) v4.3.0 (Dual-Track Edition)
+# CasinOYS 開發與維護準則 (Rule Document for Gem) v5.0 (Dual-Track Ultimate Edition)
 
 【文檔衝突解決準則 (SSOT)】
-若各文檔（包含 App 藍圖與白皮書）之間存在邏輯或數值衝突，一律以本文件 (`rule document`) 與 `system document` 作為最高標準與唯一事實來源。
+若各文檔、對話紀錄之間存在邏輯或數值衝突，一律以本文件 (`rule document`) 與 `system document` 作為最高標準。
+**CRITICAL RULE: EACH TIME MUST CHECK CODE IF YOU ARE NOT SURE. 絕對禁止憑空想像邏輯。在維護 Discord 舊版或開發 App 新版時，若不確定該機制的具體寫法，必須要求使用者提供現有代碼 (`cogs/` 或 `routers/`) 進行查閱。**
 
 【開發與討論流程 (5-Step Workflow)】
-1. 需求發起：由用戶提出建議，架構師需先判斷是「當前 Discord 系統維護」還是「App 轉型開發」。
-2. 細節展開：架構師提供該功能的具體細節與邊界條件。
-3. 執行藍圖：架構師詳細解釋該計劃在底層架構上的具體執行方式。
-4. 深度徵詢：架構師向用戶詢問決策意見（提供具體選項與數值決策）。
-5. 完整代碼輸出：雙方達成共識後，輸出 100% 完整代碼。
+1. 需求發起：確認需求是針對「Discord V4 維護」還是「App V5 開發」。
+2. 細節展開：定義功能極限、邊界條件與潛在漏洞。
+3. 執行藍圖：解釋底層架構 (Discord Bot Cogs 或 FastAPI Routers) 的實作方式。
+4. 深度徵詢：向主理人提供具體數值選項並請求拍板。
+5. 完整代碼輸出：達成共識後，輸出 100% 完整代碼 (No partial snippets)。
 
-【代碼輸出規範】
-1. 完整性原則：禁止給出部分片段 (No partial snippets)。
-2. 絕對隱私與穩定：Discord Slash Command 第一行強制 `await interaction.response.defer(ephemeral=True)`。App API 需實作適當的 HTTP 狀態碼與錯誤攔截。
-3. 註釋標準：遵循 DSE 標準，針對防套利、非同步阻塞 (Yielding) 等複雜邏輯逐行 Comment。
-4. 邏輯檢查：確認無異步阻塞 (Async Issues) 或時間重疊。
-5. 依賴注入與錯誤捕獲：禁止全域資料庫變數。Discord 需透過 `bot.db` 連線並使用 `async_db_execute` 防禦 502/503。
+【V4 Discord 舊版維護紅線 (Legacy Constraints)】
+1. 必須使用 `await interaction.response.defer(ephemeral=True)` 作為起手式。
+2. 必須透過 `bot.db` 連線，並使用 `async_db_execute` 防禦 Cloudflare 瞬斷 (502/503)。
+3. 大迴圈必須穿插 `await asyncio.sleep(0.05)` 讓出 Event Loop。
+4. VIP 7+ 升級採用「無限線性增長」公式。
 
-【系統架構與業務邏輯規範 (V4.2+ 經濟紅線)】
-1. M0 經濟與通膨控制：
-   - 採「純銀行制」，無錢包概念。
-   - 豪華無上限線性模型：VIP 7 (含) 以上採「無限線性增長 (+$70,000 / +0.2%)」，絕對禁止使用指數級公式以防通膨崩潰。
-   - 累進富人稅 (Progressive Tax)：VIP 5~10+ 贏錢派彩時抽取 1%~6% 累進稅率納入 `TREASURY` 國庫。
-   - 涓滴效應 (Trickle-down)：VIP 5+ 執行日常領取或期貨預支時，強制觸發印鈔給 VIP 1~3。
-2. 防禦機制紅線 (不可妥協)：
-   - 防套利 (Anti-Arbitrage)：單場賽事僅能押注單一選項。
-   - 資訊隔離：偷窺機制/跑馬燈 嚴禁曝光 `status == 0` (待開賽) 的注單選項。
-<<<<<<< HEAD
-   - Event Loop 讓出 (Yielding)：大迴圈中必須穿插 `asyncio.sleep(0.05)` 或等效非同步釋放機制。
-=======
-   - Event Loop 讓出 (Yielding)：大迴圈中必須穿插 `asyncio.sleep(0.05)` 或等效非同步釋放機制。
->>>>>>> b843d3dc03350c3a2a304c2eb49ffc87ba2ba4a6
+【V5.0 App 新版經濟紅線與極限數值 (Immutable Rules)】
+1. 升級與通膨回收：套用「純二次方」升級公式：$Cost = 12,500 \times VIP^2$。
+2. 稅務與重分配：
+   - 累進富人稅 (VIP 5+)：平滑稅率 $Tax = -2 + 3 \times \sqrt{VIP - 4}$，最高 10% (VIP 20+)。稅金流入 `TREASURY`。
+   - 涓滴效應：VIP 5+ 領取 Daily 時，派發 $10k, $20k, $30k 救濟金給 L1~L3。
+3. 狂熱時間 (07:00 Blood Moon)：
+   - 觸發條件：07:00 檢查 `TREASURY >= Threshold` 且今日賽事 $\ge 5$ 場。
+   - 動態閥值：$Threshold = \min(500,000, 10,000 \times FeverCount^2)$。
+   - 狂熱規則：(1) 全服絕對免稅 0%；(2) 常規下注 All-In 獲 +60% 賠率增益；(3) 盲盒保底提升至 3.0x；(4) 敗者退水 10% (系統印鈔)。
+4. 盲盒物理防線：每日限購次數嚴格鎖死為 `VIP_Level * 2` (VIP 1 至少 2 次)。
+5. 賽事盤口：僅開放 `h2h` 盤口，確保盲盒 EV 期望值模型不被擊穿。

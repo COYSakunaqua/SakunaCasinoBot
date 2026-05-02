@@ -70,14 +70,7 @@ async def buy_mystery_box(user = Depends(get_current_user)):
     is_fever_time = check_fever_time()
 
     # 1. VIP 限購防護網 (Gacha Limit)
-    if vip_lvl <= 4:
-        daily_limit = 2
-    elif vip_lvl <= 9:
-        daily_limit = vip_lvl
-    elif vip_lvl <= 14:
-        daily_limit = math.floor(vip_lvl * 1.5)
-    else:
-        daily_limit = vip_lvl * 2
+    daily_limit = max(2, vip_lvl * 2)
 
     # 檢查今日已買盲盒數量 (需對接 DB 日期過濾)
     # today_box_count = get_today_box_count(app_uuid)
