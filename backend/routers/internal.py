@@ -4,12 +4,22 @@ import httpx
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, HTTPException, Header
-# from utils.dependencies import supabase
+from fastapi import APIRouter, HTTPException, Header, Depends
+from utils.dependencies import supabase  # 確保你的 supabase client 放這裡
 
 router = APIRouter(prefix="/api/internal", tags=["Internal Tasks"])
-CRON_SECRET = os.getenv("CRON_SECRET", "dev_secret_key")
+
+# ==========================================
+# 🛡️ 環境變數與安全驗證
+# ==========================================
+CRON_SECRET_KEY = os.getenv("CRON_SECRET_KEY", "dev_secret_key")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+
+def verify_cron_secret(x_cron_secret: str = Header(None)):
+    """ 攔截器：防止惡意觸發派彩引擎 """
+    if x_cron_secret != CRON_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized Cron Execution. Secret Key mismatch.")
+    return True
 
 # ==========================================
 # 🏆 賽事白名單與防線配置
@@ -24,15 +34,109 @@ TIER_1_SPORTS = [
 ]
 TIER_2_SPORTS = ["soccer_england_championship", "soccer_friendly_match_club"]
 
+# ==========================================
+# ⚙️ 核心邏輯 (內部純異步函數)
+# ==========================================
 
-@router.post("/fetch_odds")
-async def fetch_daily_odds(x_cron_secret: str = Header(None)):
+async def _prune_internal() -> int:
+    """ 
+    歷史數據封存引擎 (Retention: 7 days)
+    清理過期的 Matches 與關聯的 Bets，嚴格釋放 Event Loop。
     """
-    動態水位抓盤引擎。
-    包含：Tier 1 白名單、Tier 2 枯水期防護 (Max 20)、h2h 專屬、強制 +20% 增益。
-    """
-    if x_cron_secret != CRON_SECRET: raise HTTPException(status_code=401)
+    now_hkt = datetime.now(ZoneInfo("Asia/Hong Kong"))
+    cutoff_time = now_hkt - timedelta(days=7)
+    cutoff_iso = cutoff_time.isoformat()
     
+    # 撈取已完賽 (status != 0) 且開賽時間超過 7 天的賽事
+    old_matches = supabase.table("Matches").select("id").neq("status", 0).lt("commence_time", cutoff_iso).execute().data
+    if not old_matches:
+        return 0
+        
+    old_match_ids = [m["id"] for m in old_matches]
+    deleted_count = 0
+    
+    # Chunked deletion (防禦 URL 長度限制與 DB Timeout)
+    chunk_size = 50
+    for i in range(0, len(old_match_ids), chunk_size):
+        chunk = old_match_ids[i:i+chunk_size]
+        
+        # 刪除關聯的 Bets (若 Supabase 已設 Foreign Key Cascade 可省略這行，但手動清較穩妥)
+        supabase.table("Bets").delete().in_("match_id", chunk).execute()
+        # 刪除 Matches
+        supabase.table("Matches").delete().in_("id", chunk).execute()
+        
+        deleted_count += len(chunk)
+        await asyncio.sleep(0.05)  # 邏輯驗證：強制讓出 Event Loop
+        
+    return deleted_count
+
+async def _settle_internal() -> dict:
+    """ 全服結算與派彩引擎 (包含富人稅與狂熱點火) """
+    now_hkt = datetime.now(ZoneInfo("Asia/Hong Kong"))
+    
+    # 1. 抓取國庫狀態與 Fever 判定
+    treasury = supabase.table("Users").select("*").eq("user_id", "TREASURY").single().execute().data
+    is_fever_time = treasury.get("fever_active_until") and now_hkt < datetime.fromisoformat(treasury["fever_active_until"])
+    
+    # 動態二次方閥值
+    fever_threshold = min(500000, 10000 * (treasury.get("fever_count", 1) ** 2))
+    
+    # 點火邏輯 (需確認今日賽事 >= 5)
+    today_matches_count = len(supabase.table("Matches").select("id").eq("status", 0).execute().data)
+    
+    if not is_fever_time and treasury["bank"] >= fever_threshold and today_matches_count >= 5:
+        treasury["bank"] -= fever_threshold
+        treasury["fever_count"] = treasury.get("fever_count", 1) + 1
+        is_fever_time = True
+        next_0700 = (now_hkt + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
+        supabase.table("Users").update({
+            "bank": treasury["bank"], 
+            "fever_count": treasury["fever_count"], 
+            "fever_active_until": next_0700.isoformat()
+        }).eq("user_id", "TREASURY").execute()
+
+    # 2. 派彩迴圈與非同步阻塞防禦 (Yielding)
+    pending_bets = supabase.table("Bets").select("*").eq("status", 0).execute().data
+    tax_collected = 0
+    settled_count = 0
+
+    for index, bet in enumerate(pending_bets):
+        if index % 10 == 0: await asyncio.sleep(0.05) # 邏輯驗證：釋放主執行緒
+            
+        # [實戰需由 API 取回賽果，此處保留你的原有假設邏輯]
+        user_db = supabase.table("Users").select("bank, daily_lvl").eq("app_uuid", bet["app_uuid"]).single().execute().data
+        if not user_db: continue
+        
+        current_bank = user_db["bank"]
+        is_win = True # 假設贏
+        
+        if is_win:
+            payout = int(bet["amount"] * bet["odds"])
+            tax_amount = 0
+            # 凹函數富人稅 (Fever 日或盲盒免稅判定)
+            if not is_fever_time and user_db["daily_lvl"] >= 5 and not bet["is_mystery_box"]:
+                tax_rate = min(10.0, max(1.0, round(-2 + 3 * math.sqrt(user_db["daily_lvl"] - 4), 2)))
+                tax_amount = int(payout * (tax_rate / 100))
+                tax_collected += tax_amount
+            current_bank += (payout - tax_amount)
+        else:
+            # 輸錢邏輯與敗者退水 (系統印鈔，不扣國庫)
+            if is_fever_time:
+                current_bank += int(bet["amount"] * 0.10)
+
+        # 批次更新狀態
+        supabase.table("Bets").update({"status": 1 if is_win else -1}).eq("id", bet["id"]).execute()
+        supabase.table("Users").update({"bank": current_bank}).eq("app_uuid", bet["app_uuid"]).execute()
+        settled_count += 1
+
+    # 稅金入國庫
+    if tax_collected > 0:
+        supabase.table("Users").update({"bank": treasury["bank"] + tax_collected}).eq("user_id", "TREASURY").execute()
+
+    return {"settled": settled_count, "fever_active": is_fever_time, "tax_collected": tax_collected}
+
+async def _fetch_odds_internal() -> dict:
+    """ 動態水位抓盤引擎 (Tier 1 + 枯水補齊) """
     matches_to_insert = []
     
     async def fetch_sport(sport_key):
@@ -80,67 +184,35 @@ async def fetch_daily_odds(x_cron_secret: str = Header(None)):
     if matches_to_insert:
         supabase.table("Matches").upsert(matches_to_insert).execute()
         
-    return {"message": "Fetched", "total": len(matches_to_insert)}
+    return {"total_inserted": len(matches_to_insert)}
 
+# ==========================================
+# 🚀 外部 API 路由 (Endpoints)
+# ==========================================
 
-@router.post("/daily_settlement")
-async def execute_daily_settlement(x_cron_secret: str = Header(None)):
+@router.post("/force_run", dependencies=[Depends(verify_cron_secret)])
+async def trigger_full_daily_routine():
+    """ 
+    終極每日排程入口。
+    由 cron-job.org 每日 07:00 (HKT) 呼叫，依序執行：清理 -> 結算 -> 抓盤。
     """
-    全服結算與派彩引擎。
-    包含：凹函數富人稅、Event Loop 防阻塞、敗者退水、狂熱點火判定。
-    """
-    if x_cron_secret != CRON_SECRET: raise HTTPException(status_code=401)
-    now_hkt = datetime.now(ZoneInfo("Asia/Hong Kong"))
+    prune_result = await _prune_internal()
+    settle_result = await _settle_internal()
+    fetch_result = await _fetch_odds_internal()
     
-    # 1. 抓取國庫狀態與 Fever 判定
-    treasury = supabase.table("Users").select("*").eq("user_id", "TREASURY").single().execute().data
-    is_fever_time = treasury.get("fever_active_until") and now_hkt < datetime.fromisoformat(treasury["fever_active_until"])
-    fever_threshold = min(500000, 10000 * (treasury.get("fever_count", 1) ** 2))
-    
-    # 點火邏輯 (需確認今日賽事 >= 5，此處略過 DB Count 示意)
-    if not is_fever_time and treasury["bank"] >= fever_threshold:
-        treasury["bank"] -= fever_threshold
-        treasury["fever_count"] = treasury.get("fever_count", 1) + 1
-        is_fever_time = True
-        next_0700 = (now_hkt + timedelta(days=1)).replace(hour=7, minute=0, second=0, microsecond=0)
-        supabase.table("Users").update({
-            "bank": treasury["bank"], "fever_count": treasury["fever_count"], "fever_active_until": next_0700.isoformat()
-        }).eq("user_id", "TREASURY").execute()
+    return {
+        "status": "success",
+        "timestamp": datetime.now(ZoneInfo("Asia/Hong Kong")).isoformat(),
+        "pruned_matches": prune_result,
+        "settlement": settle_result,
+        "odds_fetched": fetch_result
+    }
 
-    # 2. 派彩迴圈與非同步阻塞防禦 (Yielding)
-    pending_bets = supabase.table("Bets").select("*").eq("status", 0).execute().data
-    finished_matches = {"match_id_example": "team_A"} # 實戰需由 API 取回賽果
-    tax_collected = 0
+# 為了方便後端測試，保留獨立 Endpoint
+@router.post("/fetch_odds", dependencies=[Depends(verify_cron_secret)])
+async def fetch_daily_odds_route():
+    return await _fetch_odds_internal()
 
-    for index, bet in enumerate(pending_bets):
-        if index % 10 == 0: await asyncio.sleep(0.05) # 邏輯驗證：釋放主執行緒
-            
-        # 賽果核對邏輯...
-        user_db = supabase.table("Users").select("bank, daily_lvl").eq("app_uuid", bet["app_uuid"]).single().execute().data
-        if not user_db: continue
-        
-        current_bank = user_db["bank"]
-        is_win = True # 假設贏
-        
-        if is_win:
-            payout = int(bet["amount"] * bet["odds"])
-            tax_amount = 0
-            # 凹函數富人稅 (Fever 日或盲盒免稅判定)
-            if not is_fever_time and user_db["daily_lvl"] >= 5 and not bet["is_mystery_box"]:
-                tax_rate = min(10.0, max(1.0, round(-2 + 3 * math.sqrt(user_db["daily_lvl"] - 4), 2)))
-                tax_amount = int(payout * (tax_rate / 100))
-                tax_collected += tax_amount
-            current_bank += (payout - tax_amount)
-        else:
-            # 輸錢邏輯與敗者退水 (系統印鈔，不扣國庫)
-            if is_fever_time:
-                current_bank += int(bet["amount"] * 0.10)
-
-        # 批次更新狀態...
-        supabase.table("Bets").update({"status": 1 if is_win else -1}).eq("id", bet["id"]).execute()
-        supabase.table("Users").update({"bank": current_bank}).eq("app_uuid", bet["app_uuid"]).execute()
-
-    if tax_collected > 0:
-        supabase.table("Users").update({"bank": treasury["bank"] + tax_collected}).eq("user_id", "TREASURY").execute()
-
-    return {"msg": "Settled", "fever": is_fever_time, "tax": tax_collected}
+@router.post("/daily_settlement", dependencies=[Depends(verify_cron_secret)])
+async def execute_daily_settlement_route():
+    return await _settle_internal()
