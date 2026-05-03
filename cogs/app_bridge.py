@@ -26,16 +26,14 @@ class AppBridge(commands.Cog):
         expiry_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=15)
         expiry_str = expiry_time.isoformat()
 
-        # 4. 寫入資料庫 (使用 Supabase PostgREST 語法進行 UPSERT)
+        # 4. 寫入資料庫 (Burn on Use 策略，拔除 is_used)
         try:
-            # 構建 Supabase 查詢物件 (Query Builder)
             query = self.bot.db.table("AppVerification").upsert({
                 "user_id": user_id,
                 "code": bind_code,
                 "expires_at": expiry_str
             })
             
-            # 透過自訂的防護層執行 (防禦 Cloudflare 瞬斷)
             res = await async_db_execute(query)
             
             if res.data:
@@ -53,7 +51,6 @@ class AppBridge(commands.Cog):
                 await interaction.followup.send("❌ 寫入失敗，請稍後再試。", ephemeral=True)
 
         except Exception as e:
-            # 攔截所有錯誤，防止卡在「正在思考...」
             print(f"[AppBridge Error] {e}")
             await interaction.followup.send(f"❌ 系統發生預期外錯誤，無法生成驗證碼。請聯絡架構師。", ephemeral=True)
 

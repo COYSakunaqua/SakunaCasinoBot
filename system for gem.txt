@@ -1,26 +1,18 @@
-# CasinOYS 系統架構與技術白皮書 (System for Gem) v5.0
+# CasinOYS 系統架構與技術白皮書 (System for Gem) v5.1
 
 ## 1. 雙軌並行架構 (Dual-Track State)
-系統目前處於「Discord Bot 維護」與「App 轉型開發」並行期。資料庫 (Supabase) 必須同時兼容兩者。
-* **Discord Bot 核心 (`main.py` & `cogs/`)**：依賴 `discord.py`，使用 Cogs 動態載入。透過 HTTP 請求直接與 Supabase 溝通，依賴 `discord_id`。
-* **App 後端核心 (`backend/routers/`)**：基於 FastAPI 的 RESTful 架構，託管於 Render。無狀態伺服器，透過 JWT 與 `app_uuid` 進行身分驗證。
-* **App 前端核心 (`ui/`)**：基於 Next.js 14 + Zustand 全域狀態管理，託管於 Vercel。提供 PWA 體驗。
+系統目前處於「Discord Bot 維護」與「App 轉型開發」並行期。
+* Discord Bot 核心 (`main.py` & `cogs/`)：依賴 `discord.py`。
+* App 後端核心 (`backend/routers/`)：FastAPI RESTful 架構 (Render)。
+* App 前端核心 (`src/`)：Next.js 14 + Zustand 全域狀態 + Framer Motion 動畫 (Vercel)。
+* 混合身分認證 (Hybrid Auth)：V5 前端目前採行 Supabase Email Auth 作為 Web 原生登入入口（為繞過 Rate Limit 與 Email Confirmation，開發期採用後台 Auto Confirm 注入），未來將並行 Discord OAuth。
 
 ## 2. 精品盤口動態抓取引擎 (Boutique Fetching Protocol - V5)
-對接 The Odds API，實施「降級備用」與「極限保護」機制：
-* **Tier 1 (首選)**：EPL, La Liga, Bundesliga, Serie A, Ligue 1, UCL/UEL, FIFA/UEFA 盃賽。
-* **Tier 2 (枯水期)**：Championship, Club Friendlies。
-* **動態水位限制**：每天至少 10 場，最多 20 場 (若 Tier 1 賽事爆發則無視 20 場上限，全數抓取)。
-* **莊家優勢**：寫入資料庫前，所有原始賠率強制套用「淨利潤 +20%」增益。
+(維持原 Tier 1/Tier 2 與 +20% 莊家優勢設定)
 
-## 3. 資料庫綱要 (Supabase Schema - V4/V5 共存版)
-* **Users 表**：
-  - `user_id` (TEXT/PK): Discord 用戶 ID (V4 依賴)。
-  - `app_uuid` (UUID/Nullable): App 使用者的唯一識別碼 (V5 依賴)。
-  - `bank`, `daily_lvl`, `is_streak`, `rng_normal` ~ `rng_redraw`。
-* **AppVerification 表**：
-  - `user_id` (關聯 Users 表), `code` (4 位數轉移金鑰), `expires_at` (15分鐘後過期)。
-* **Matches 表 (V5 專用)**：
-  - `id` (PK), `sport_title`, `home_team`, `away_team`, `odds_data` (JSON, 僅限 h2h), `status` (0=待開, 1=已完, -1=無效)。
-* **Bets 表**：
-  - `id` (PK), `app_uuid` (或 `discord_id`), `match_id`, `option_id`, `amount`, `odds`, `is_mystery_box`, `status` (0=待結算, 1=贏, -1=輸)。
+## 3. 資料庫綱要 (Supabase Schema)
+* Users 表：
+  - `user_id` (TEXT/PK): 雙軌共用。Discord ID 或 Supabase Auth 產生的 UUID。
+  - `bank` (INT4): 玩家餘額核心欄位 (注意非 balance)。
+  - `app_uuid`, `daily_lvl`, `is_streak`, `rng_normal` ~ `rng_redraw`。
+* Matches / Bets 表：(維持原設定)

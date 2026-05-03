@@ -3,7 +3,7 @@ from backend.routers import economy, internal
 
 app = FastAPI(title="CasinOYS V5 Backend")
 
-# 解決 404：強制所有路由在 Vercel 轉發後能正確匹配 /api 前綴
+# 統一在此處掛載 /api 前綴。完美對接 Vercel Serverless 與 Next.js Proxy
 app.include_router(economy.router, prefix="/api")
 app.include_router(internal.router, prefix="/api")
 
@@ -12,7 +12,7 @@ async def health_check():
     """系統健康檢查端點"""
     return {
         "status": "online",
-        "system": "CasinOYS V5.0 Stateless Backend",
+        "system": "CasinOYS V5.0 Stateless Backend (Vercel Edition)",
         "defense_level": "Maximum",
-        "note": "If you see this, the routing is finally aligned."
+        "note": "Global routing standardization deployed."
     }
